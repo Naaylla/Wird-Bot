@@ -1,0 +1,19 @@
+[package]
+name = "wird"
+version = "0.1.0"
+edition = "2021"
+description = "A Discord bot that helps you memorise one ayah of the Qur'an per day."
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+dotenvy = "0.15"
+html-escape = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serenity = "0.12"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
