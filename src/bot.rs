@@ -42,6 +42,7 @@ async fn run_command(ctx: &Context, command: &CommandInteraction) -> Result<()> 
     match command.data.name.as_str() {
         "wird" => commands::wird(ctx, command).await,
         "progress" => commands::progress(ctx, command).await,
+        "leaderboard" => commands::leaderboard(ctx, command).await,
         other => {
             warn!("unknown command: {other}");
             Ok(())
@@ -53,6 +54,8 @@ async fn register_commands(ctx: &Context) {
     let commands = vec![
         CreateCommand::new("wird").description("Show today's ayah and mark it as memorized"),
         CreateCommand::new("progress").description("Show your memorized count and daily streak"),
+        CreateCommand::new("leaderboard")
+            .description("Show the server's daily memorization streak leaderboard"),
     ];
 
     let guild_id = std::env::var("GUILD_ID")

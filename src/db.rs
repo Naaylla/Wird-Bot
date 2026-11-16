@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -19,6 +19,12 @@ pub struct Stats {
     pub total: u32,
     pub streak: u32,
     pub done_today: bool,
+}
+
+pub struct LeaderEntry {
+    pub user_id: u64,
+    pub total: u32,
+    pub streak: u32,
 }
 
 pub fn open(path: &str) -> Result<Connection> {
@@ -78,18 +84,7 @@ pub async fn stats(db: Arc<Mutex<Connection>>, user_id: u64, today: NaiveDate) -
             .collect();
 
         let known: HashSet<NaiveDate> = days.iter().copied().collect();
-        let done_today = known.contains(&today);
-        let mut cursor = if done_today {
-            today
-        } else {
-            today - Days::new(1)
-        };
-        let mut streak: u32 = 0;
-
-        while known.contains(&cursor) {
-            streak += 1;
-            cursor = cursor - Days::new(1);
-        }
+        let (streak, done_today) = active_streak(&known, today);
 
         Ok(Stats {
             total: days.len() as u32,
@@ -98,6 +93,73 @@ pub async fn stats(db: Arc<Mutex<Connection>>, user_id: u64, today: NaiveDate) -
         })
     })
     .await?
+}
+
+pub async fn leaderboard(
+    db: Arc<Mutex<Connection>>,
+    today: NaiveDate,
+    limit: usize,
+) -> Result<Vec<LeaderEntry>> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<LeaderEntry>> {
+        let connection = lock(&db);
+        let mut statement = connection.prepare("SELECT user_id, day FROM memorizations")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut by_user: HashMap<u64, Vec<NaiveDate>> = HashMap::new();
+        for row in rows {
+            let (user_id, day) = row?;
+            let (Ok(user_id), Ok(day)) = (
+                user_id.parse::<u64>(),
+                NaiveDate::parse_from_str(&day, "%Y-%m-%d"),
+            ) else {
+                continue;
+            };
+            by_user.entry(user_id).or_default().push(day);
+        }
+
+        let mut entries: Vec<LeaderEntry> = by_user
+            .into_iter()
+            .map(|(user_id, days)| {
+                let known: HashSet<NaiveDate> = days.iter().copied().collect();
+                let (streak, _) = active_streak(&known, today);
+                LeaderEntry {
+                    user_id,
+                    total: days.len() as u32,
+                    streak,
+                }
+            })
+            .collect();
+
+        entries.sort_by(|a, b| {
+            b.streak
+                .cmp(&a.streak)
+                .then(b.total.cmp(&a.total))
+                .then(a.user_id.cmp(&b.user_id))
+        });
+        entries.truncate(limit);
+
+        Ok(entries)
+    })
+    .await?
+}
+
+fn active_streak(known: &HashSet<NaiveDate>, today: NaiveDate) -> (u32, bool) {
+    let done_today = known.contains(&today);
+    let mut cursor = if done_today {
+        today
+    } else {
+        today - Days::new(1)
+    };
+    let mut streak: u32 = 0;
+
+    while known.contains(&cursor) {
+        streak += 1;
+        cursor = cursor - Days::new(1);
+    }
+
+    (streak, done_today)
 }
 
 #[cfg(test)]
@@ -129,6 +191,45 @@ mod tests {
         assert_eq!(stats.total, 1);
         assert_eq!(stats.streak, 1);
         assert!(stats.done_today);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn leaderboard_ranks_by_current_streak() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("wird-leader-test-{unique}.db"));
+        let connection = open(path.to_str().unwrap()).unwrap();
+        let db = Arc::new(Mutex::new(connection));
+
+        for day in ["2026-11-10", "2026-11-11", "2026-11-12"] {
+            mark_done(db.clone(), 1, day, "2:255").await.unwrap();
+        }
+        mark_done(db.clone(), 2, "2026-11-12", "2:255")
+            .await
+            .unwrap();
+        mark_done(db.clone(), 3, "2026-11-01", "2:255")
+            .await
+            .unwrap();
+
+        let today = NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        let entries = leaderboard(db.clone(), today, 10).await.unwrap();
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].user_id, 1);
+        assert_eq!(entries[0].streak, 3);
+        assert_eq!(entries[0].total, 3);
+        assert_eq!(entries[1].user_id, 2);
+        assert_eq!(entries[1].streak, 1);
+        assert_eq!(entries[2].user_id, 3);
+        assert_eq!(entries[2].streak, 0);
+
+        let top = leaderboard(db, today, 1).await.unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].user_id, 1);
 
         let _ = std::fs::remove_file(path);
     }

@@ -1,6 +1,7 @@
 use chrono::NaiveDate;
 use serenity::all::{ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedFooter};
 
+use crate::db::LeaderEntry;
 use crate::quran::{self, Ayah, Chapter};
 
 const GREEN: u32 = 0x2E_CC_71;
@@ -72,6 +73,43 @@ pub fn progress_embed(total: u32, streak: u32, done_today: bool) -> CreateEmbed 
         ))
         .colour(GREEN)
         .footer(CreateEmbedFooter::new("One ayah a day"))
+}
+
+pub fn leaderboard_embed(entries: &[LeaderEntry], today: NaiveDate) -> CreateEmbed {
+    let description = if entries.is_empty() {
+        "No one has memorized an ayah yet. Be the first — run `/wird`.".to_owned()
+    } else {
+        entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                format!(
+                    "**#{}** <@{}> — {} · {}",
+                    index + 1,
+                    entry.user_id,
+                    plural(entry.streak, "day"),
+                    plural(entry.total, "ayah"),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    CreateEmbed::new()
+        .title("Wird Leaderboard")
+        .description(description)
+        .colour(GREEN)
+        .footer(CreateEmbedFooter::new(format!(
+            "Daily memorization streaks · {today}"
+        )))
+}
+
+fn plural(count: u32, word: &str) -> String {
+    if count == 1 {
+        format!("{count} {word}")
+    } else {
+        format!("{count} {word}s")
+    }
 }
 
 pub fn daily_buttons(day: NaiveDate, verse_key: &str, done: bool) -> CreateActionRow {

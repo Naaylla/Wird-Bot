@@ -56,6 +56,28 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     Ok(())
 }
 
+pub async fn leaderboard(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    command
+        .create_response(
+            ctx.http.clone(),
+            CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+        )
+        .await?;
+
+    let data = Data::from_context(ctx).await?;
+    let today = Utc::now().date_naive();
+    let entries = db::leaderboard(data.db.clone(), today, 15).await?;
+
+    command
+        .edit_response(
+            ctx.http.clone(),
+            EditInteractionResponse::new().embed(ui::leaderboard_embed(&entries, today)),
+        )
+        .await?;
+
+    Ok(())
+}
+
 pub async fn progress(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     command
         .create_response(

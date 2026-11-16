@@ -59,6 +59,7 @@ You should see `Wird is online` and `slash commands registered`.
 | --- | --- |
 | `/wird` | Shows today's ayah and the Memorized / Tafsir buttons |
 | `/progress` | Shows your total and your streak (private) |
+| `/leaderboard` | Shows the server's current memorization streaks |
 
 The daily ayah uses **UTC dates**, so everyone sees the same ayah on the same day and it changes at midnight UTC.
 
@@ -100,6 +101,10 @@ PRIMARY KEY (user_id, day)
 ```
 
 The Memorized button uses `INSERT OR IGNORE`. The first click inserts a row; later clicks on the same day insert nothing. That is the whole "one per day" rule, enforced by the database rather than by timers.
+
+### Leaderboard
+
+`/leaderboard` ranks everyone in the server by their **current** streak, the same way a daily habit app does: consecutive UTC days with a memorization. Ties are broken by total ayahs memorized. A missed day resets your streak to zero. The message is public so the whole server can see it.
 
 ### Buttons
 
