@@ -4,6 +4,8 @@
 
 A Discord bot for memorising the Qur'an one ayah at a time.
 
+![Wird showing an ayah and its tafsir in Discord](assets/wird-preview.png)
+
 ## Features
 
 - Choose a plan: memorise the whole Qur'an in order, or focus on one surah.
