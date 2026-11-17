@@ -177,6 +177,18 @@ pub fn reset_confirm_buttons() -> CreateActionRow {
     ])
 }
 
+pub fn memorization_announcement(user_id: u64, verse_key: &str) -> String {
+    format!(
+        "MashaAllah! <@{user_id}> just memorized **{verse_key}** today. What about you? Go for it, one ayah at a time, in shaa Allah!"
+    )
+}
+
+pub fn reset_cancel_button() -> CreateActionRow {
+    CreateActionRow::Buttons(vec![CreateButton::new("wird|reset|dismiss")
+        .label("Cancel")
+        .style(ButtonStyle::Secondary)])
+}
+
 pub fn clean_text(input: &str) -> String {
     let without_notes = remove_tag_blocks(input, "sup");
     normalize(&strip_tags(&without_notes))
@@ -291,6 +303,15 @@ mod tests {
             clean_text("Allah<sup foot_note=1>2</sup> is One."),
             "Allah is One."
         );
+    }
+
+    #[test]
+    fn memorization_announcement_mentions_only_the_completer() {
+        let message = memorization_announcement(123, "2:255");
+
+        assert!(message.contains("<@123>"));
+        assert!(message.contains("**2:255**"));
+        assert_eq!(message.matches("<@").count(), 1);
     }
 
     #[test]

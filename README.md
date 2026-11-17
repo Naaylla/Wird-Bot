@@ -13,6 +13,7 @@ A Discord bot for memorising the Qur'an one ayah at a time.
 - After finishing a surah plan, choose another with `/plan`.
 - View Arabic text, English translation, and tafsir.
 - Check your progress and server leaderboard.
+- Celebrate each successful memorization in the channel so everyone can see the progress. Only the person who memorized is mentioned; `/wird` controls stay private.
 
 Ayah text and tafsir are fetched from the [Quran.com API](https://api.quran.com/api/v4). The tafsir buttons use **Tafsir Ibn Kathir** in English (ID 169) and **Tafsir al-Muyassar** in Arabic (ID 16).
 

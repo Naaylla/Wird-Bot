@@ -148,7 +148,16 @@ async fn memorized(
         }
     };
 
-    reply_ephemeral(ctx, component, &message).await
+    reply_ephemeral(ctx, component, &message).await?;
+
+    if result == db::MarkResult::Inserted {
+        component
+            .channel_id
+            .say(&ctx.http, ui::memorization_announcement(user_id, verse_key))
+            .await?;
+    }
+
+    Ok(())
 }
 
 async fn reset(ctx: &Context, component: &ComponentInteraction, step: &str) -> Result<()> {
@@ -164,7 +173,8 @@ async fn reset(ctx: &Context, component: &ComponentInteraction, step: &str) -> R
             )
             .components(vec![ui::reset_confirm_buttons()]),
         "cancel" => CreateInteractionResponseMessage::new()
-            .content("Reset cancelled. Nothing was changed."),
+            .content("Reset cancelled. Nothing was changed.")
+            .components(Vec::new()),
         "confirm" => {
             let data = Data::from_context(ctx).await?;
             db::reset(
@@ -173,10 +183,17 @@ async fn reset(ctx: &Context, component: &ComponentInteraction, step: &str) -> R
                 component.user.id.get(),
             )
             .await?;
-            CreateInteractionResponseMessage::new().content(
+            CreateInteractionResponseMessage::new()
+                .content(
+                    "Your progress has been reset. Run `/wird` to start again from the first ayah of your plan, or `/plan` to choose a different plan.",
+                )
+                .components(vec![ui::reset_cancel_button()])
+        }
+        "dismiss" => CreateInteractionResponseMessage::new()
+            .content(
                 "Your progress has been reset. Run `/wird` to start again from the first ayah of your plan, or `/plan` to choose a different plan.",
             )
-        }
+            .components(Vec::new()),
         _ => return Ok(()),
     };
 
