@@ -118,9 +118,13 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     let day = Utc::now().date_naive();
     let day_string = day.format("%Y-%m-%d").to_string();
     let completed_today = db::verse_for_day(data.db.clone(), user_id, &day_string).await?;
-    let verse_key = match completed_today.as_deref() {
-        Some(verse_key) => verse_key.to_owned(),
-        None => match plan.next_verse {
+    let done = completed_today
+        .as_deref()
+        .is_some_and(|completed| is_current_plan_ayah(plan, completed));
+    let blocked_today = completed_today.is_some() && !done;
+    let verse_key = match (done, completed_today.as_deref()) {
+        (true, Some(verse_key)) => verse_key.to_owned(),
+        _ => match plan.next_verse {
             Some((surah, ayah)) => format!("{surah}:{ayah}"),
             None => {
                 let message = match plan.target_surah {
@@ -163,7 +167,6 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
         }
     };
 
-    let done = completed_today.is_some();
     let (surah, _) = quran::verse_parts(&ayah.verse_key);
     let chapter = data.chapters.get(&surah);
 
@@ -171,8 +174,13 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
         .edit_response(
             ctx.http.clone(),
             EditInteractionResponse::new()
-                .embed(ui::daily_embed(day, &ayah, chapter, done))
-                .components(vec![ui::daily_buttons(day, &ayah.verse_key, done)]),
+                .embed(ui::daily_embed(day, &ayah, chapter, done, blocked_today))
+                .components(vec![ui::daily_buttons(
+                    day,
+                    &ayah.verse_key,
+                    done,
+                    blocked_today,
+                )]),
         )
         .await?;
 
@@ -241,6 +249,18 @@ fn option_string<'a>(command: &'a CommandInteraction, name: &str) -> Option<&'a 
         })
 }
 
+fn is_current_plan_ayah(plan: db::Plan, completed_verse: &str) -> bool {
+    let expected = match plan.next_verse {
+        Some(current) => quran::previous_verse(current, plan.target_surah),
+        None => quran::final_verse(plan.target_surah),
+    };
+
+    expected
+        .map(|(surah, ayah)| format!("{surah}:{ayah}"))
+        .as_deref()
+        == Some(completed_verse)
+}
+
 async fn reply_ephemeral(ctx: &Context, command: &CommandInteraction, message: &str) -> Result<()> {
     command
         .create_response(
@@ -254,4 +274,31 @@ async fn reply_ephemeral(ctx: &Context, command: &CommandInteraction, message: &
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_previous_plan_completion_does_not_replace_the_new_plan_ayah() {
+        let plan = db::Plan {
+            target_surah: Some(10),
+            next_verse: Some((10, 1)),
+        };
+        assert!(!is_current_plan_ayah(plan, "31:11"));
+        assert!(!is_current_plan_ayah(plan, "10:1"));
+
+        let next_ayah = db::Plan {
+            target_surah: Some(10),
+            next_verse: Some((10, 2)),
+        };
+        assert!(is_current_plan_ayah(next_ayah, "10:1"));
+
+        let completed_surah = db::Plan {
+            target_surah: Some(10),
+            next_verse: None,
+        };
+        assert!(is_current_plan_ayah(completed_surah, "10:109"));
+    }
 }

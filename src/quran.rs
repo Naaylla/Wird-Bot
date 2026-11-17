@@ -137,6 +137,29 @@ pub fn next_verse(current: (u16, u16), target_surah: Option<u16>) -> Option<(u16
     }
 }
 
+pub fn previous_verse(current: (u16, u16), target_surah: Option<u16>) -> Option<(u16, u16)> {
+    let (surah, ayah) = current;
+    let count = chapter_ayah_count(surah)?;
+
+    if ayah == 0 || ayah > count || target_surah.is_some_and(|target| target != surah) {
+        return None;
+    }
+
+    if ayah > 1 {
+        Some((surah, ayah - 1))
+    } else if target_surah.is_none() && surah > 1 {
+        let previous_surah = surah - 1;
+        chapter_ayah_count(previous_surah).map(|last_ayah| (previous_surah, last_ayah))
+    } else {
+        None
+    }
+}
+
+pub fn final_verse(target_surah: Option<u16>) -> Option<(u16, u16)> {
+    let surah = target_surah.unwrap_or(114);
+    chapter_ayah_count(surah).map(|last_ayah| (surah, last_ayah))
+}
+
 pub fn verse_parts(verse_key: &str) -> (u16, u16) {
     let mut parts = verse_key.split(':');
     let surah = parts.next().and_then(|part| part.parse().ok()).unwrap_or(1);
@@ -202,5 +225,9 @@ mod tests {
         assert_eq!(next_verse((1, 7), None), Some((2, 1)));
         assert_eq!(next_verse((1, 7), Some(1)), None);
         assert_eq!(next_verse((114, 6), None), None);
+        assert_eq!(previous_verse((2, 1), None), Some((1, 7)));
+        assert_eq!(previous_verse((10, 1), Some(10)), None);
+        assert_eq!(final_verse(Some(10)), Some((10, 109)));
+        assert_eq!(final_verse(None), Some((114, 6)));
     }
 }

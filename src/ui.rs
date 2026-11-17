@@ -5,12 +5,14 @@ use crate::db::LeaderEntry;
 use crate::quran::{self, Ayah, Chapter};
 
 const GREEN: u32 = 0x2E_CC_71;
+const BASMALA: &str = "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ";
 
 pub fn daily_embed(
     day: NaiveDate,
     ayah: &Ayah,
     chapter: Option<&Chapter>,
     done: bool,
+    blocked_today: bool,
 ) -> CreateEmbed {
     let (surah, ayah_number) = quran::verse_parts(&ayah.verse_key);
     let title = match chapter {
@@ -22,11 +24,14 @@ pub fn daily_embed(
     };
     let body = format!(
         "{}\n\n**Translation**\n{}",
-        ayah.arabic,
+        daily_arabic(ayah),
         clean_text(&ayah.translation)
     );
     let footer = if done {
         format!("Memorized on {day}. Your next ayah is available tomorrow.")
+    } else if blocked_today {
+        "You already memorized a different ayah today. Your current plan continues tomorrow."
+            .to_owned()
     } else {
         "Click \"Memorized\" when you have learned this ayah. Your sequence advances the next day."
             .to_owned()
@@ -58,6 +63,15 @@ pub fn tafsir_embed(
         .description(truncate(&clean_tafsir(text), 4_000))
         .colour(GREEN)
         .footer(CreateEmbedFooter::new(format!("Source: {source}")))
+}
+
+fn daily_arabic(ayah: &Ayah) -> String {
+    let (surah, ayah_number) = quran::verse_parts(&ayah.verse_key);
+    if ayah_number == 1 && surah != 1 && surah != 9 {
+        format!("{BASMALA}\n\n{}", ayah.arabic)
+    } else {
+        ayah.arabic.clone()
+    }
 }
 
 pub fn progress_embed(total: u32, streak: u32, done_today: bool) -> CreateEmbed {
@@ -113,13 +127,24 @@ fn plural(count: u32, word: &str) -> String {
     }
 }
 
-pub fn daily_buttons(day: NaiveDate, verse_key: &str, done: bool) -> CreateActionRow {
+pub fn daily_buttons(
+    day: NaiveDate,
+    verse_key: &str,
+    done: bool,
+    blocked_today: bool,
+) -> CreateActionRow {
     let day = day.format("%Y-%m-%d");
 
     let memorized = CreateButton::new(format!("wird|memorized|{day}|{verse_key}"))
-        .label(if done { "Memorized ✓" } else { "Memorized" })
+        .label(if done {
+            "Memorized ✓"
+        } else if blocked_today {
+            "Limit reached today"
+        } else {
+            "Memorized"
+        })
         .style(ButtonStyle::Success)
-        .disabled(done);
+        .disabled(done || blocked_today);
     let tafsir_en = CreateButton::new(format!("wird|tafsir_en|{verse_key}"))
         .label("Tafsir (EN)")
         .style(ButtonStyle::Secondary);
@@ -244,5 +269,24 @@ mod tests {
             clean_text("Allah<sup foot_note=1>2</sup> is One."),
             "Allah is One."
         );
+    }
+
+    #[test]
+    fn basmala_is_added_to_surah_openings_when_not_an_ayah() {
+        let ayah = Ayah {
+            verse_key: "10:1".to_owned(),
+            arabic: "الر تِلْكَ آيَاتُ الْكِتَابِ الْحَكِيمِ".to_owned(),
+            translation: String::new(),
+        };
+        assert!(daily_arabic(&ayah).starts_with(BASMALA));
+
+        for verse_key in ["1:1", "9:1", "10:2"] {
+            let ayah = Ayah {
+                verse_key: verse_key.to_owned(),
+                arabic: "ayah".to_owned(),
+                translation: String::new(),
+            };
+            assert_eq!(daily_arabic(&ayah), "ayah");
+        }
     }
 }
