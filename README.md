@@ -1,6 +1,6 @@
 # Wird
 
-**[Add Wird to your Discord server](https://discord.com/oauth2/authorize?client_id=1572037133248761926&permissions=2147535872&integration_type=0&scope=applications.commands+bot)**
+## [ADD WIRD TO YOUR DISCORD SERVER](https://discord.com/oauth2/authorize?client_id=1572037133248761926&permissions=2147535872&integration_type=0&scope=applications.commands+bot)
 
 A Discord bot for memorising the Qur'an one ayah at a time.
 
