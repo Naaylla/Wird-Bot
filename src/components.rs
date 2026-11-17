@@ -71,17 +71,62 @@ async fn memorized(
 
     let data = Data::from_context(ctx).await?;
     let user_id = component.user.id.get();
-    let inserted = db::mark_done(data.db.clone(), user_id, day, verse_key).await?;
-
-    let message = if inserted {
-        let stats = db::stats(data.db.clone(), user_id, Utc::now().date_naive()).await?;
-        format!(
-            "MashaAllah! You memorized {verse_key} today. Current streak: {} day(s). Come back tomorrow for the next ayah.",
-            stats.streak
+    if db::verse_for_day(data.db.clone(), user_id, day)
+        .await?
+        .is_some()
+    {
+        return reply_ephemeral(
+            ctx,
+            component,
+            "You already memorized today's ayah. One ayah a day — come back tomorrow, in shaa Allah.",
         )
-    } else {
-        "You already memorized today's ayah. One ayah a day — come back tomorrow, in shaa Allah."
-            .to_owned()
+        .await;
+    }
+
+    let Some(plan) = db::get_plan(data.db.clone(), user_id).await? else {
+        return reply_ephemeral(
+            ctx,
+            component,
+            "Choose a memorization plan with `/plan` first.",
+        )
+        .await;
+    };
+    let Some(current) = plan.next_verse else {
+        return reply_ephemeral(
+            ctx,
+            component,
+            "This plan is complete. Use `/plan` to continue.",
+        )
+        .await;
+    };
+    let current_key = format!("{}:{}", current.0, current.1);
+    if current_key != verse_key {
+        return reply_ephemeral(
+            ctx,
+            component,
+            "That is not your current ayah. Run `/wird` to get your current one.",
+        )
+        .await;
+    }
+
+    let next = quran::next_verse(current, plan.target_surah);
+    let result = db::mark_done(data.db.clone(), user_id, day, verse_key, plan, next).await?;
+
+    let message = match result {
+        db::MarkResult::Inserted => {
+            let stats = db::stats(data.db.clone(), user_id, Utc::now().date_naive()).await?;
+            format!(
+                "MashaAllah! You memorized {verse_key} today. Current streak: {} day(s). Your next ayah will be available tomorrow.",
+                stats.streak
+            )
+        }
+        db::MarkResult::AlreadyDone => {
+            "You already memorized today's ayah. One ayah a day — come back tomorrow, in shaa Allah."
+                .to_owned()
+        }
+        db::MarkResult::Stale => {
+            "Your plan has changed. Run `/wird` to get your current ayah.".to_owned()
+        }
     };
 
     reply_ephemeral(ctx, component, &message).await

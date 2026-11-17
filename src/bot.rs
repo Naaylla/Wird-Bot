@@ -1,7 +1,8 @@
 use anyhow::Result;
 use serenity::all::{
-    Command, CommandInteraction, ComponentInteraction, Context, CreateCommand,
-    CreateInteractionResponse, CreateInteractionResponseMessage, GuildId, Interaction, Ready,
+    Command, CommandInteraction, CommandOptionType, ComponentInteraction, Context, CreateCommand,
+    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage, GuildId,
+    Interaction, Ready,
 };
 use serenity::async_trait;
 use serenity::prelude::EventHandler;
@@ -27,6 +28,11 @@ impl EventHandler for Handler {
                     notify_command_failure(&ctx, &command).await;
                 }
             }
+            Interaction::Autocomplete(command) => {
+                if let Err(err) = commands::autocomplete(&ctx, &command).await {
+                    error!("command autocomplete failed: {err:#}");
+                }
+            }
             Interaction::Component(component) => {
                 if let Err(err) = components::handle(&ctx, &component).await {
                     error!("button failed: {err:#}");
@@ -40,6 +46,7 @@ impl EventHandler for Handler {
 
 async fn run_command(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     match command.data.name.as_str() {
+        "plan" => commands::plan(ctx, command).await,
         "wird" => commands::wird(ctx, command).await,
         "progress" => commands::progress(ctx, command).await,
         "leaderboard" => commands::leaderboard(ctx, command).await,
@@ -52,7 +59,27 @@ async fn run_command(ctx: &Context, command: &CommandInteraction) -> Result<()> 
 
 async fn register_commands(ctx: &Context) {
     let commands = vec![
-        CreateCommand::new("wird").description("Show today's ayah and mark it as memorized"),
+        CreateCommand::new("plan")
+            .description("Choose your personal memorization plan")
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "mode",
+                    "Choose the whole Qur'an or one surah",
+                )
+                .required(true)
+                .add_string_choice("Full Qur'an", "quran")
+                .add_string_choice("One surah", "surah"),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "surah",
+                    "Search for a surah to memorize",
+                )
+                .set_autocomplete(true),
+            ),
+        CreateCommand::new("wird").description("Show your current ayah and memorization buttons"),
         CreateCommand::new("progress").description("Show your memorized count and daily streak"),
         CreateCommand::new("leaderboard")
             .description("Show the server's daily memorization streak leaderboard"),

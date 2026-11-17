@@ -26,9 +26,10 @@ pub fn daily_embed(
         clean_text(&ayah.translation)
     );
     let footer = if done {
-        format!("Memorized on {day}. One ayah a day — come back tomorrow.")
+        format!("Memorized on {day}. Your next ayah is available tomorrow.")
     } else {
-        "One ayah a day. Click \"Memorized\" when you are done.".to_owned()
+        "Click \"Memorized\" when you have learned this ayah. Your sequence advances the next day."
+            .to_owned()
     };
 
     CreateEmbed::new()

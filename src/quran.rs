@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{Datelike, NaiveDate};
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -10,7 +9,6 @@ const API_BASE: &str = "https://api.quran.com/api/v4";
 const TRANSLATION_ID: u32 = 20;
 pub const TAFSIR_EN_ID: u32 = 169;
 pub const TAFSIR_AR_ID: u32 = 16;
-const TOTAL_AYAHS: u64 = 6236;
 
 const SURAH_LENGTHS: [u16; 114] = [
     7, 286, 200, 176, 120, 165, 206, 75, 129, 109, 123, 111, 43, 52, 99, 128, 111, 110, 98, 135,
@@ -115,19 +113,28 @@ impl QuranClient {
     }
 }
 
-pub fn daily_verse_key(date: NaiveDate) -> String {
-    let days = date.num_days_from_ce() as u64;
-    let mut index = (days.wrapping_mul(7919) % TOTAL_AYAHS) + 1;
+pub fn chapter_ayah_count(surah: u16) -> Option<u16> {
+    surah
+        .checked_sub(1)
+        .and_then(|index| SURAH_LENGTHS.get(usize::from(index)))
+        .copied()
+}
 
-    for (position, length) in SURAH_LENGTHS.iter().enumerate() {
-        let length = u64::from(*length);
-        if index <= length {
-            return format!("{}:{index}", position + 1);
-        }
-        index -= length;
+pub fn next_verse(current: (u16, u16), target_surah: Option<u16>) -> Option<(u16, u16)> {
+    let (surah, ayah) = current;
+    let count = chapter_ayah_count(surah)?;
+
+    if ayah == 0 || ayah > count || target_surah.is_some_and(|target| target != surah) {
+        return None;
     }
 
-    "1:1".to_owned()
+    if ayah < count {
+        Some((surah, ayah + 1))
+    } else if target_surah.is_none() && surah < SURAH_LENGTHS.len() as u16 {
+        Some((surah + 1, 1))
+    } else {
+        None
+    }
 }
 
 pub fn verse_parts(verse_key: &str) -> (u16, u16) {
@@ -184,22 +191,16 @@ mod tests {
     #[test]
     fn surah_lengths_add_up_to_the_whole_quran() {
         let total: u32 = SURAH_LENGTHS.iter().map(|length| u32::from(*length)).sum();
-        assert_eq!(u64::from(total), TOTAL_AYAHS);
+        assert_eq!(total, 6236);
     }
 
     #[test]
-    fn every_day_gets_a_valid_and_different_ayah() {
-        let day = NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
-        let next = day.succ_opt().unwrap();
-        let first = daily_verse_key(day);
-        let second = daily_verse_key(next);
-        assert_ne!(first, second);
-
-        for key in [first, second] {
-            let (surah, ayah) = verse_parts(&key);
-            assert!((1..=114).contains(&surah));
-            assert!(ayah >= 1);
-            assert!(SURAH_LENGTHS[usize::from(surah) - 1] >= ayah);
-        }
+    fn sequence_advances_in_quran_order_and_stops_at_boundaries() {
+        assert_eq!(chapter_ayah_count(0), None);
+        assert_eq!(chapter_ayah_count(1), Some(7));
+        assert_eq!(next_verse((1, 1), None), Some((1, 2)));
+        assert_eq!(next_verse((1, 7), None), Some((2, 1)));
+        assert_eq!(next_verse((1, 7), Some(1)), None);
+        assert_eq!(next_verse((114, 6), None), None);
     }
 }
