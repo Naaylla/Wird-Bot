@@ -1,5 +1,7 @@
 # Wird
 
+**[Add Wird to your Discord server](https://discord.com/oauth2/authorize?client_id=1572037133248761926&permissions=2147535872&integration_type=0&scope=applications.commands+bot)**
+
 A Discord bot for memorising the Qur'an one ayah at a time.
 
 ## Features
@@ -15,7 +17,7 @@ Ayah text and tafsir are fetched from the [Quran.com API](https://api.quran.com/
 ## Setup
 
 1. Install [Rust](https://rustup.rs). On Windows, you may also need [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **Desktop development with C++** workload.
-2. Create a bot in the [Discord Developer Portal](https://discord.com/developers/applications), then invite it with the `bot` and `applications.commands` scopes. It needs **View Channels**, **Send Messages**, and **Embed Links** permissions.
+2. Create a bot in the [Discord Developer Portal](https://discord.com/developers/applications), then authorize it using the invite link above. It needs **View Channels**, **Send Messages**, and **Embed Links** permissions.
 3. Copy `.env.example` to `.env` and add your bot token:
 
    ```powershell
