@@ -9,7 +9,7 @@ A Discord bot for memorising the Qur'an one ayah at a time.
 ## Features
 
 - Choose a plan: memorise the whole Qur'an in order, or focus on one surah.
-- Each person's plan and progress are separate. Your current ayah stays until you mark it memorised; the next ayah is available the following day.
+- Each person's plan and progress are separate, and kept per server. Your current ayah stays until you mark it memorised; the next ayah is available the following day.
 - After finishing a surah plan, choose another with `/plan`.
 - View Arabic text, English translation, and tafsir.
 - Check your progress and server leaderboard.
@@ -27,7 +27,7 @@ Ayah text and tafsir are fetched from the [Quran.com API](https://api.quran.com/
    notepad .env
    ```
 
-   Keep `.env` private. Set `GUILD_ID` to your test server's ID for faster slash-command updates.
+   Keep `.env` private. Slash commands are registered per server automatically.
 4. Start the bot:
 
    ```powershell
@@ -42,5 +42,6 @@ Ayah text and tafsir are fetched from the [Quran.com API](https://api.quran.com/
 | `/wird` | Show your current ayah and tafsir buttons |
 | `/progress` | View your memorization total and streak |
 | `/leaderboard` | View the server leaderboard |
+| `/reset` | Reset your own progress and streak in this server |
 
 Run `cargo test` to run the tests. Memorization data is stored in `wird.db`; keep that file on persistent storage when hosting the bot.

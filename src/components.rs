@@ -48,6 +48,10 @@ pub async fn handle(ctx: &Context, component: &ComponentInteraction) -> Result<(
             )
             .await
         }
+        "reset" => {
+            let step = parts.next().unwrap_or_default();
+            reset(ctx, component, step).await
+        }
         _ => Ok(()),
     }
 }
@@ -69,9 +73,14 @@ async fn memorized(
         .await;
     }
 
+    let Some(guild_id) = component.guild_id else {
+        return reply_ephemeral(ctx, component, "Use this in a server.").await;
+    };
+    let guild_id = guild_id.get();
+
     let data = Data::from_context(ctx).await?;
     let user_id = component.user.id.get();
-    if db::verse_for_day(data.db.clone(), user_id, day)
+    if db::verse_for_day(data.db.clone(), guild_id, user_id, day)
         .await?
         .is_some()
     {
@@ -83,7 +92,7 @@ async fn memorized(
         .await;
     }
 
-    let Some(plan) = db::get_plan(data.db.clone(), user_id).await? else {
+    let Some(plan) = db::get_plan(data.db.clone(), guild_id, user_id).await? else {
         return reply_ephemeral(
             ctx,
             component,
@@ -110,11 +119,21 @@ async fn memorized(
     }
 
     let next = quran::next_verse(current, plan.target_surah);
-    let result = db::mark_done(data.db.clone(), user_id, day, verse_key, plan, next).await?;
+    let result = db::mark_done(
+        data.db.clone(),
+        guild_id,
+        user_id,
+        day,
+        verse_key,
+        plan,
+        next,
+    )
+    .await?;
 
     let message = match result {
         db::MarkResult::Inserted => {
-            let stats = db::stats(data.db.clone(), user_id, Utc::now().date_naive()).await?;
+            let stats =
+                db::stats(data.db.clone(), guild_id, user_id, Utc::now().date_naive()).await?;
             format!(
                 "MashaAllah! You memorized {verse_key} today. Current streak: {} day(s). Your next ayah will be available tomorrow.",
                 stats.streak
@@ -130,6 +149,45 @@ async fn memorized(
     };
 
     reply_ephemeral(ctx, component, &message).await
+}
+
+async fn reset(ctx: &Context, component: &ComponentInteraction, step: &str) -> Result<()> {
+    let Some(guild_id) = component.guild_id else {
+        return reply_ephemeral(ctx, component, "Use this in a server.").await;
+    };
+    let guild_id = guild_id.get();
+
+    let message = match step {
+        "confirm_prompt" => CreateInteractionResponseMessage::new()
+            .content(
+                "Are you absolutely sure? Your streak and every ayah you memorized in this server will be deleted, and your plan will restart from the first ayah. This cannot be undone.",
+            )
+            .components(vec![ui::reset_confirm_buttons()]),
+        "cancel" => CreateInteractionResponseMessage::new()
+            .content("Reset cancelled. Nothing was changed."),
+        "confirm" => {
+            let data = Data::from_context(ctx).await?;
+            db::reset(
+                data.db.clone(),
+                guild_id,
+                component.user.id.get(),
+            )
+            .await?;
+            CreateInteractionResponseMessage::new().content(
+                "Your progress has been reset. Run `/wird` to start again from the first ayah of your plan, or `/plan` to choose a different plan.",
+            )
+        }
+        _ => return Ok(()),
+    };
+
+    component
+        .create_response(
+            ctx.http.clone(),
+            CreateInteractionResponse::UpdateMessage(message),
+        )
+        .await?;
+
+    Ok(())
 }
 
 async fn tafsir(

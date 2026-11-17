@@ -1,8 +1,8 @@
 use anyhow::Result;
 use serenity::all::{
     Command, CommandInteraction, CommandOptionType, ComponentInteraction, Context, CreateCommand,
-    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage, GuildId,
-    Interaction, Ready,
+    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage, Guild,
+    GuildId, Interaction, Ready,
 };
 use serenity::async_trait;
 use serenity::prelude::EventHandler;
@@ -17,7 +17,18 @@ pub struct Handler;
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!("logged in as {}", ready.user.name);
-        register_commands(&ctx).await;
+
+        if let Err(err) = Command::set_global_commands(&ctx.http, Vec::new()).await {
+            warn!("could not clear global commands: {err}");
+        }
+
+        for guild in &ready.guilds {
+            register_commands(&ctx, guild.id).await;
+        }
+    }
+
+    async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: Option<bool>) {
+        register_commands(&ctx, guild.id).await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -50,6 +61,7 @@ async fn run_command(ctx: &Context, command: &CommandInteraction) -> Result<()> 
         "wird" => commands::wird(ctx, command).await,
         "progress" => commands::progress(ctx, command).await,
         "leaderboard" => commands::leaderboard(ctx, command).await,
+        "reset" => commands::reset(ctx, command).await,
         other => {
             warn!("unknown command: {other}");
             Ok(())
@@ -57,8 +69,8 @@ async fn run_command(ctx: &Context, command: &CommandInteraction) -> Result<()> 
     }
 }
 
-async fn register_commands(ctx: &Context) {
-    let commands = vec![
+fn command_definitions() -> Vec<CreateCommand> {
+    vec![
         CreateCommand::new("plan")
             .description("Choose your personal memorization plan")
             .add_option(
@@ -83,20 +95,17 @@ async fn register_commands(ctx: &Context) {
         CreateCommand::new("progress").description("Show your memorized count and daily streak"),
         CreateCommand::new("leaderboard")
             .description("Show the server's daily memorization streak leaderboard"),
-    ];
+        CreateCommand::new("reset").description("Reset your progress and streak in this server"),
+    ]
+}
 
-    let guild_id = std::env::var("GUILD_ID")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok());
-
-    let result = match guild_id {
-        Some(id) => GuildId::new(id).set_commands(&ctx.http, commands).await,
-        None => Command::set_global_commands(&ctx.http, commands).await,
-    };
-
-    match result {
-        Ok(_) => info!("slash commands registered"),
-        Err(err) => error!("could not register slash commands: {err}"),
+async fn register_commands(ctx: &Context, guild_id: GuildId) {
+    match guild_id
+        .set_commands(&ctx.http, command_definitions())
+        .await
+    {
+        Ok(_) => info!("slash commands registered for guild {guild_id}"),
+        Err(err) => error!("could not register slash commands for guild {guild_id}: {err}"),
     }
 }
 

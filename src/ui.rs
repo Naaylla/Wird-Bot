@@ -155,6 +155,28 @@ pub fn daily_buttons(
     CreateActionRow::Buttons(vec![memorized, tafsir_en, tafsir_ar])
 }
 
+pub fn reset_prompt_buttons() -> CreateActionRow {
+    CreateActionRow::Buttons(vec![
+        CreateButton::new("wird|reset|confirm_prompt")
+            .label("Continue")
+            .style(ButtonStyle::Danger),
+        CreateButton::new("wird|reset|cancel")
+            .label("Cancel")
+            .style(ButtonStyle::Secondary),
+    ])
+}
+
+pub fn reset_confirm_buttons() -> CreateActionRow {
+    CreateActionRow::Buttons(vec![
+        CreateButton::new("wird|reset|confirm")
+            .label("Yes, delete everything")
+            .style(ButtonStyle::Danger),
+        CreateButton::new("wird|reset|cancel")
+            .label("Cancel")
+            .style(ButtonStyle::Secondary),
+    ])
+}
+
 pub fn clean_text(input: &str) -> String {
     let without_notes = remove_tag_blocks(input, "sup");
     normalize(&strip_tags(&without_notes))

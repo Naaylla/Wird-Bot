@@ -54,6 +54,10 @@ pub async fn autocomplete(ctx: &Context, command: &CommandInteraction) -> Result
 }
 
 pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let Some(guild_id) = guild_id(command) else {
+        return reply_ephemeral(ctx, command, "Use this command in a server.").await;
+    };
+
     let mode = option_string(command, "mode").unwrap_or_default();
     let target_surah = match mode {
         "quran" => None,
@@ -82,7 +86,13 @@ pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     };
 
     let data = Data::from_context(ctx).await?;
-    let plan = db::set_plan(data.db.clone(), command.user.id.get(), target_surah).await?;
+    let plan = db::set_plan(
+        data.db.clone(),
+        guild_id,
+        command.user.id.get(),
+        target_surah,
+    )
+    .await?;
     let name = match target_surah {
         Some(surah) => data
             .chapters
@@ -104,9 +114,13 @@ pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
 }
 
 pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let Some(guild_id) = guild_id(command) else {
+        return reply_ephemeral(ctx, command, "Use this command in a server.").await;
+    };
+
     let data = Data::from_context(ctx).await?;
     let user_id = command.user.id.get();
-    let Some(plan) = db::get_plan(data.db.clone(), user_id).await? else {
+    let Some(plan) = db::get_plan(data.db.clone(), guild_id, user_id).await? else {
         return reply_ephemeral(
             ctx,
             command,
@@ -117,7 +131,8 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
 
     let day = Utc::now().date_naive();
     let day_string = day.format("%Y-%m-%d").to_string();
-    let completed_today = db::verse_for_day(data.db.clone(), user_id, &day_string).await?;
+    let completed_today =
+        db::verse_for_day(data.db.clone(), guild_id, user_id, &day_string).await?;
     let done = completed_today
         .as_deref()
         .is_some_and(|completed| is_current_plan_ayah(plan, completed));
@@ -148,7 +163,9 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     command
         .create_response(
             ctx.http.clone(),
-            CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+            CreateInteractionResponse::Defer(
+                CreateInteractionResponseMessage::new().ephemeral(true),
+            ),
         )
         .await?;
 
@@ -188,6 +205,10 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
 }
 
 pub async fn leaderboard(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let Some(guild_id) = guild_id(command) else {
+        return reply_ephemeral(ctx, command, "Use this command in a server.").await;
+    };
+
     command
         .create_response(
             ctx.http.clone(),
@@ -197,7 +218,7 @@ pub async fn leaderboard(ctx: &Context, command: &CommandInteraction) -> Result<
 
     let data = Data::from_context(ctx).await?;
     let today = Utc::now().date_naive();
-    let entries = db::leaderboard(data.db.clone(), today, 15).await?;
+    let entries = db::leaderboard(data.db.clone(), guild_id, today, 15).await?;
 
     command
         .edit_response(
@@ -210,6 +231,10 @@ pub async fn leaderboard(ctx: &Context, command: &CommandInteraction) -> Result<
 }
 
 pub async fn progress(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let Some(guild_id) = guild_id(command) else {
+        return reply_ephemeral(ctx, command, "Use this command in a server.").await;
+    };
+
     command
         .create_response(
             ctx.http.clone(),
@@ -221,7 +246,7 @@ pub async fn progress(ctx: &Context, command: &CommandInteraction) -> Result<()>
 
     let data = Data::from_context(ctx).await?;
     let user_id = command.user.id.get();
-    let stats = db::stats(data.db.clone(), user_id, Utc::now().date_naive()).await?;
+    let stats = db::stats(data.db.clone(), guild_id, user_id, Utc::now().date_naive()).await?;
 
     command
         .edit_response(
@@ -235,6 +260,32 @@ pub async fn progress(ctx: &Context, command: &CommandInteraction) -> Result<()>
         .await?;
 
     Ok(())
+}
+
+pub async fn reset(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let Some(_guild_id) = guild_id(command) else {
+        return reply_ephemeral(ctx, command, "Use this command in a server.").await;
+    };
+
+    command
+        .create_response(
+            ctx.http.clone(),
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(
+                        "Reset your progress in this server?\n\nThis deletes every ayah you have memorized here and restarts your plan from the first ayah. This cannot be undone.",
+                    )
+                    .components(vec![ui::reset_prompt_buttons()])
+                    .ephemeral(true),
+            ),
+        )
+        .await?;
+
+    Ok(())
+}
+
+fn guild_id(command: &CommandInteraction) -> Option<u64> {
+    command.guild_id.map(|guild| guild.get())
 }
 
 fn option_string<'a>(command: &'a CommandInteraction, name: &str) -> Option<&'a str> {
