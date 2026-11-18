@@ -13,6 +13,7 @@ A Discord bot for memorising the Qur'an at your own pace, one ayah at a time.
 - Each person's plan and progress are separate, and kept per server. The next ayah is available once you have marked the current one, up to your daily target.
 - After finishing a surah plan, choose another with `/plan`.
 - View Arabic text, English translation, and tafsir.
+- Get a daily DM at the time you choose (with your UTC offset) when that day's wird is still unfinished.
 - Check your progress and server leaderboard.
 - Celebrate each successful memorization in the channel so everyone can see the progress. Only the person who memorized is mentioned; `/wird` controls stay private.
 - New servers get a short welcome panel, and `/help` explains how everything works.
@@ -45,7 +46,8 @@ Ayah text and tafsir are fetched from the [Quran.com API](https://api.quran.com/
 | `/wird` | Show your current ayah and tafsir buttons |
 | `/progress` | View your memorization total and streak |
 | `/leaderboard` | View the server leaderboard |
+| `/remind` | Get a daily DM when your wird is unfinished; `/remind disable:true` turns it off |
 | `/reset` | Reset your own progress and streak in this server |
 | `/help` | A quick guide to the bot and its commands |
 
-Run `cargo test` to run the tests. Memorization data is stored in `wird.db`; keep that file on persistent storage when hosting the bot.
+Reminder DMs require the person to allow direct messages from server members. Run `cargo test` to run the tests. Memorization data is stored in `wird.db`; keep that file on persistent storage when hosting the bot.
