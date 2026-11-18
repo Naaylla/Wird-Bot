@@ -932,6 +932,76 @@ mod tests {
     }
 
     #[test]
+    fn a_guild_scoped_database_learns_the_daily_target_without_losing_progress() {
+        let path = temp_path("upgrade");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE memorizations (
+                         guild_id   TEXT NOT NULL,
+                         user_id    TEXT NOT NULL,
+                         day        TEXT NOT NULL,
+                         verse_key  TEXT NOT NULL,
+                         created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                         PRIMARY KEY (guild_id, user_id, day)
+                     );
+                     CREATE TABLE user_plans (
+                         guild_id     TEXT NOT NULL,
+                         user_id      TEXT NOT NULL,
+                         target_surah INTEGER,
+                         next_surah   INTEGER,
+                         next_ayah    INTEGER,
+                         PRIMARY KEY (guild_id, user_id),
+                         CHECK ((next_surah IS NULL) = (next_ayah IS NULL))
+                     );
+                     INSERT INTO user_plans (guild_id, user_id, target_surah, next_surah, next_ayah)
+                         VALUES ('1', '7', NULL, 1, 2);
+                     INSERT INTO memorizations (guild_id, user_id, day, verse_key)
+                         VALUES ('1', '7', '2026-11-12', '1:1');",
+                )
+                .unwrap();
+        }
+
+        let connection = open(path.to_str().unwrap()).unwrap();
+
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        let plan: (Option<u16>, Option<u16>, u16) = connection
+            .query_row(
+                "SELECT next_surah, next_ayah, daily_target FROM user_plans
+                 WHERE guild_id = '1' AND user_id = '7'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(plan, (Some(1), Some(2), 1));
+
+        connection
+            .execute(
+                "INSERT INTO memorizations (guild_id, user_id, day, verse_key)
+                 VALUES ('1', '7', '2026-11-12', '1:2')",
+                [],
+            )
+            .unwrap();
+        let (day, verses): (String, u16) = connection
+            .query_row(
+                "SELECT day, COUNT(*) FROM memorizations
+                 WHERE guild_id = '1' AND user_id = '7'
+                 GROUP BY day",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((day.as_str(), verses), ("2026-11-12", 2));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn an_old_global_database_is_migrated_without_losing_progress() {
         let path = temp_path("migration");
         {
