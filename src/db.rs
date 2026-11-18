@@ -59,9 +59,14 @@ pub struct LeaderEntry {
 
 pub fn open(path: &str) -> Result<Connection> {
     let connection = Connection::open(path)?;
+    let fresh = !table_exists(&connection, "user_plans")?;
     migrate(&connection)?;
     connection.execute_batch(SCHEMA)?;
-    upgrade(&connection)?;
+    if fresh {
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    } else {
+        upgrade(&connection)?;
+    }
     Ok(connection)
 }
 
@@ -908,6 +913,20 @@ mod tests {
                 .total,
             1
         );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_new_database_starts_at_the_current_schema_version() {
+        let path = temp_path("fresh");
+        let connection = open(path.to_str().unwrap()).unwrap();
+
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 2);
 
         let _ = std::fs::remove_file(path);
     }
