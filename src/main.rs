@@ -1,4 +1,5 @@
 mod bot;
+mod chapters;
 mod commands;
 mod components;
 mod data;
@@ -7,6 +8,7 @@ mod quran;
 mod ui;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use serenity::all::GatewayIntents;
@@ -15,6 +17,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
+use crate::chapters::Chapters;
 use crate::data::Data;
 
 #[tokio::main]
@@ -37,13 +40,11 @@ async fn main() -> Result<()> {
     let db = db::open("wird.db").context("could not open the database")?;
     let api = quran::QuranClient::new()?;
 
-    let chapters = match api.chapters().await {
-        Ok(chapters) => chapters,
-        Err(err) => {
-            warn!("could not load surah names, falling back to numbers: {err:#}");
-            Default::default()
-        }
-    };
+    let chapters = Chapters::default();
+    if let Err(err) = chapters.load(&api).await {
+        warn!("could not load surah names, retrying in the background: {err:#}");
+    }
+    tokio::spawn(refresh_chapters(api.clone(), chapters.clone()));
 
     let data = Arc::new(Data {
         db: Arc::new(Mutex::new(db)),
@@ -62,6 +63,21 @@ async fn main() -> Result<()> {
     client.start().await.context("the Discord client stopped")?;
 
     Ok(())
+}
+
+async fn refresh_chapters(api: quran::QuranClient, chapters: Chapters) {
+    loop {
+        let delay = if chapters.is_empty().await {
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(24 * 60 * 60)
+        };
+        tokio::time::sleep(delay).await;
+
+        if let Err(err) = chapters.load(&api).await {
+            warn!("could not refresh surah names: {err:#}");
+        }
+    }
 }
 
 async fn keep_alive() {

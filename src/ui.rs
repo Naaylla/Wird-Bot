@@ -1,8 +1,9 @@
 use chrono::NaiveDate;
 use serenity::all::{ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedFooter};
 
+use crate::chapters::Chapter;
 use crate::db::LeaderEntry;
-use crate::quran::{self, Ayah, Chapter};
+use crate::quran::{self, Ayah};
 
 const GREEN: u32 = 0x2E_CC_71;
 const BASMALA: &str = "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ";

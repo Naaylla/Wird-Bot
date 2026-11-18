@@ -1,16 +1,16 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serenity::prelude::{Context as SerenityContext, TypeMapKey};
 
-use crate::quran::{Chapter, QuranClient};
+use crate::chapters::Chapters;
+use crate::quran::QuranClient;
 
 pub struct Data {
     pub db: Arc<Mutex<Connection>>,
     pub api: QuranClient,
-    pub chapters: HashMap<u16, Chapter>,
+    pub chapters: Chapters,
 }
 
 impl TypeMapKey for Data {

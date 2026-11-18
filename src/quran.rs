@@ -1,28 +1,15 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::Deserialize;
 
+use crate::chapters::{Chapter, ChapterList};
+
 const API_BASE: &str = "https://api.quran.com/api/v4";
 const TRANSLATION_ID: u32 = 20;
 pub const TAFSIR_EN_ID: u32 = 169;
 pub const TAFSIR_AR_ID: u32 = 16;
-
-const SURAH_LENGTHS: [u16; 114] = [
-    7, 286, 200, 176, 120, 165, 206, 75, 129, 109, 123, 111, 43, 52, 99, 128, 111, 110, 98, 135,
-    112, 78, 118, 64, 77, 227, 93, 88, 69, 60, 34, 30, 73, 54, 45, 83, 182, 88, 75, 85, 54, 53, 89,
-    59, 37, 35, 38, 29, 18, 45, 60, 49, 62, 55, 78, 96, 29, 22, 24, 13, 14, 11, 11, 18, 12, 12, 30,
-    52, 52, 44, 28, 28, 20, 56, 40, 31, 50, 40, 46, 42, 29, 19, 36, 25, 22, 17, 19, 26, 30, 20, 15,
-    21, 11, 8, 8, 19, 5, 8, 8, 11, 11, 8, 3, 9, 5, 4, 7, 3, 6, 3, 5, 4, 5, 6,
-];
-
-#[derive(Clone)]
-pub struct Chapter {
-    pub name: String,
-    pub arabic: String,
-}
 
 pub struct Ayah {
     pub verse_key: String,
@@ -30,6 +17,7 @@ pub struct Ayah {
     pub translation: String,
 }
 
+#[derive(Clone)]
 pub struct QuranClient {
     http: Client,
 }
@@ -45,7 +33,7 @@ impl QuranClient {
         Ok(Self { http })
     }
 
-    pub async fn chapters(&self) -> Result<HashMap<u16, Chapter>> {
+    pub async fn chapters(&self) -> Result<ChapterList> {
         let response: ChaptersResponse = self
             .http
             .get(format!("{API_BASE}/chapters?language=en"))
@@ -64,6 +52,7 @@ impl QuranClient {
                     Chapter {
                         name: chapter.name_simple,
                         arabic: chapter.name_arabic,
+                        verses: chapter.verses_count,
                     },
                 )
             })
@@ -113,53 +102,6 @@ impl QuranClient {
     }
 }
 
-pub fn chapter_ayah_count(surah: u16) -> Option<u16> {
-    surah
-        .checked_sub(1)
-        .and_then(|index| SURAH_LENGTHS.get(usize::from(index)))
-        .copied()
-}
-
-pub fn next_verse(current: (u16, u16), target_surah: Option<u16>) -> Option<(u16, u16)> {
-    let (surah, ayah) = current;
-    let count = chapter_ayah_count(surah)?;
-
-    if ayah == 0 || ayah > count || target_surah.is_some_and(|target| target != surah) {
-        return None;
-    }
-
-    if ayah < count {
-        Some((surah, ayah + 1))
-    } else if target_surah.is_none() && surah < SURAH_LENGTHS.len() as u16 {
-        Some((surah + 1, 1))
-    } else {
-        None
-    }
-}
-
-pub fn previous_verse(current: (u16, u16), target_surah: Option<u16>) -> Option<(u16, u16)> {
-    let (surah, ayah) = current;
-    let count = chapter_ayah_count(surah)?;
-
-    if ayah == 0 || ayah > count || target_surah.is_some_and(|target| target != surah) {
-        return None;
-    }
-
-    if ayah > 1 {
-        Some((surah, ayah - 1))
-    } else if target_surah.is_none() && surah > 1 {
-        let previous_surah = surah - 1;
-        chapter_ayah_count(previous_surah).map(|last_ayah| (previous_surah, last_ayah))
-    } else {
-        None
-    }
-}
-
-pub fn final_verse(target_surah: Option<u16>) -> Option<(u16, u16)> {
-    let surah = target_surah.unwrap_or(114);
-    chapter_ayah_count(surah).map(|last_ayah| (surah, last_ayah))
-}
-
 pub fn verse_parts(verse_key: &str) -> (u16, u16) {
     let mut parts = verse_key.split(':');
     let surah = parts.next().and_then(|part| part.parse().ok()).unwrap_or(1);
@@ -177,6 +119,7 @@ struct ChapterResponse {
     id: u16,
     name_simple: String,
     name_arabic: String,
+    verses_count: u16,
 }
 
 #[derive(Deserialize)]
@@ -205,29 +148,4 @@ struct TafsirResponse {
 #[derive(Deserialize)]
 struct Tafsir {
     text: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn surah_lengths_add_up_to_the_whole_quran() {
-        let total: u32 = SURAH_LENGTHS.iter().map(|length| u32::from(*length)).sum();
-        assert_eq!(total, 6236);
-    }
-
-    #[test]
-    fn sequence_advances_in_quran_order_and_stops_at_boundaries() {
-        assert_eq!(chapter_ayah_count(0), None);
-        assert_eq!(chapter_ayah_count(1), Some(7));
-        assert_eq!(next_verse((1, 1), None), Some((1, 2)));
-        assert_eq!(next_verse((1, 7), None), Some((2, 1)));
-        assert_eq!(next_verse((1, 7), Some(1)), None);
-        assert_eq!(next_verse((114, 6), None), None);
-        assert_eq!(previous_verse((2, 1), None), Some((1, 7)));
-        assert_eq!(previous_verse((10, 1), Some(10)), None);
-        assert_eq!(final_verse(Some(10)), Some((10, 109)));
-        assert_eq!(final_verse(None), Some((114, 6)));
-    }
 }

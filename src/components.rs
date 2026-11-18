@@ -6,6 +6,7 @@ use serenity::all::{
 };
 use tracing::warn;
 
+use crate::chapters;
 use crate::data::Data;
 use crate::db;
 use crate::quran;
@@ -79,6 +80,7 @@ async fn memorized(
     let guild_id = guild_id.get();
 
     let data = Data::from_context(ctx).await?;
+    let chapters = data.chapters.snapshot().await;
     let user_id = component.user.id.get();
     if db::verse_for_day(data.db.clone(), guild_id, user_id, day)
         .await?
@@ -118,7 +120,7 @@ async fn memorized(
         .await;
     }
 
-    let next = quran::next_verse(current, plan.target_surah);
+    let next = chapters::next_verse(&chapters, current, plan.target_surah);
     let result = db::mark_done(
         data.db.clone(),
         guild_id,
@@ -217,6 +219,7 @@ async fn tafsir(
     component.defer_ephemeral(ctx.http.clone()).await?;
 
     let data = Data::from_context(ctx).await?;
+    let chapters = data.chapters.snapshot().await;
     let text = match data.api.tafsir(tafsir_id, verse_key).await {
         Ok(text) => text,
         Err(err) => {
@@ -233,7 +236,7 @@ async fn tafsir(
     };
 
     let (surah, _) = quran::verse_parts(verse_key);
-    let chapter = data.chapters.get(&surah);
+    let chapter = chapters.get(&surah);
 
     component
         .edit_response(

@@ -6,6 +6,7 @@ use serenity::all::{
 };
 use tracing::warn;
 
+use crate::chapters;
 use crate::data::Data;
 use crate::db;
 use crate::quran;
@@ -23,14 +24,12 @@ pub async fn autocomplete(ctx: &Context, command: &CommandInteraction) -> Result
         .unwrap_or_default();
 
     let data = Data::from_context(ctx).await?;
+    let chapters = data.chapters.snapshot().await;
     let mut response = CreateAutocompleteResponse::new();
     let mut choice_count = 0;
 
-    for surah in 1..=114 {
-        let label = match data.chapters.get(&surah) {
-            Some(chapter) => format!("{surah}. {} ({})", chapter.name, chapter.arabic),
-            None => format!("Surah {surah}"),
-        };
+    for (surah, chapter) in chapters.iter() {
+        let label = format!("{surah}. {} ({})", chapter.name, chapter.arabic);
         let matches = query.is_empty()
             || label.to_lowercase().contains(&query)
             || surah.to_string().starts_with(&query);
@@ -59,12 +58,14 @@ pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     };
 
     let mode = option_string(command, "mode").unwrap_or_default();
+    let data = Data::from_context(ctx).await?;
+    let chapters = data.chapters.snapshot().await;
     let target_surah = match mode {
         "quran" => None,
         "surah" => {
             let Some(surah) = option_string(command, "surah")
                 .and_then(|value| value.parse::<u16>().ok())
-                .filter(|surah| quran::chapter_ayah_count(*surah).is_some())
+                .filter(|surah| chapters.contains_key(surah))
             else {
                 return reply_ephemeral(
                     ctx,
@@ -85,7 +86,6 @@ pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
         }
     };
 
-    let data = Data::from_context(ctx).await?;
     let plan = db::set_plan(
         data.db.clone(),
         guild_id,
@@ -94,8 +94,7 @@ pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     )
     .await?;
     let name = match target_surah {
-        Some(surah) => data
-            .chapters
+        Some(surah) => chapters
             .get(&surah)
             .map(|chapter| chapter.name.as_str())
             .unwrap_or("the selected surah"),
@@ -119,6 +118,7 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     };
 
     let data = Data::from_context(ctx).await?;
+    let chapters = data.chapters.snapshot().await;
     let user_id = command.user.id.get();
     let Some(plan) = db::get_plan(data.db.clone(), guild_id, user_id).await? else {
         return reply_ephemeral(
@@ -135,7 +135,7 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
         db::verse_for_day(data.db.clone(), guild_id, user_id, &day_string).await?;
     let done = completed_today
         .as_deref()
-        .is_some_and(|completed| is_current_plan_ayah(plan, completed));
+        .is_some_and(|completed| is_current_plan_ayah(&chapters, plan, completed));
     let blocked_today = completed_today.is_some() && !done;
     let verse_key = match (done, completed_today.as_deref()) {
         (true, Some(verse_key)) => verse_key.to_owned(),
@@ -145,7 +145,7 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
                 let message = match plan.target_surah {
                     Some(surah) => format!(
                         "You have finished Surah {}. Use `/plan` to choose another plan.",
-                        data.chapters
+                        chapters
                             .get(&surah)
                             .map(|chapter| chapter.name.as_str())
                             .unwrap_or("you selected")
@@ -185,7 +185,7 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     };
 
     let (surah, _) = quran::verse_parts(&ayah.verse_key);
-    let chapter = data.chapters.get(&surah);
+    let chapter = chapters.get(&surah);
 
     command
         .edit_response(
@@ -300,10 +300,14 @@ fn option_string<'a>(command: &'a CommandInteraction, name: &str) -> Option<&'a 
         })
 }
 
-fn is_current_plan_ayah(plan: db::Plan, completed_verse: &str) -> bool {
+fn is_current_plan_ayah(
+    chapters: &chapters::ChapterList,
+    plan: db::Plan,
+    completed_verse: &str,
+) -> bool {
     let expected = match plan.next_verse {
-        Some(current) => quran::previous_verse(current, plan.target_surah),
-        None => quran::final_verse(plan.target_surah),
+        Some(current) => chapters::previous_verse(chapters, current, plan.target_surah),
+        None => chapters::final_verse(chapters, plan.target_surah),
     };
 
     expected
@@ -333,23 +337,34 @@ mod tests {
 
     #[test]
     fn a_previous_plan_completion_does_not_replace_the_new_plan_ayah() {
+        let chapters: chapters::ChapterList = [(
+            10,
+            chapters::Chapter {
+                name: "Yunus".to_owned(),
+                arabic: "يونس".to_owned(),
+                verses: 109,
+            },
+        )]
+        .into_iter()
+        .collect();
+
         let plan = db::Plan {
             target_surah: Some(10),
             next_verse: Some((10, 1)),
         };
-        assert!(!is_current_plan_ayah(plan, "31:11"));
-        assert!(!is_current_plan_ayah(plan, "10:1"));
+        assert!(!is_current_plan_ayah(&chapters, plan, "31:11"));
+        assert!(!is_current_plan_ayah(&chapters, plan, "10:1"));
 
         let next_ayah = db::Plan {
             target_surah: Some(10),
             next_verse: Some((10, 2)),
         };
-        assert!(is_current_plan_ayah(next_ayah, "10:1"));
+        assert!(is_current_plan_ayah(&chapters, next_ayah, "10:1"));
 
         let completed_surah = db::Plan {
             target_surah: Some(10),
             next_verse: None,
         };
-        assert!(is_current_plan_ayah(completed_surah, "10:109"));
+        assert!(is_current_plan_ayah(&chapters, completed_surah, "10:109"));
     }
 }
