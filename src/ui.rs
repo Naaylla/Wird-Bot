@@ -115,6 +115,7 @@ pub fn help_embed() -> CreateEmbed {
              `/wird` — show your current ayah and mark it memorized\n\
              `/progress` — see your total and daily streak\n\
              `/leaderboard` — the server's streak leaderboard\n\
+             `/remind` — get a daily DM when your wird is unfinished\n\
              `/reset` — reset your progress in this server\n\
              `/help` — this message",
         )
@@ -132,7 +133,7 @@ pub fn intro_embed() -> CreateEmbed {
              2. `/wird` — get your next ayah with its Arabic text and translation.\n\
              3. Tap **Memorized** when you have learned it. Come back daily to grow your streak.\n\n\
              **Commands**\n\
-             `/plan` · `/wird` · `/progress` · `/leaderboard` · `/reset` · `/help`\n\n\
+             `/plan` · `/wird` · `/progress` · `/leaderboard` · `/remind` · `/reset` · `/help`\n\n\
              Start with `/plan`, and may Allah make it easy for you.",
         )
         .colour(GREEN)
