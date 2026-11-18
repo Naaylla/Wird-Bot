@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use chrono::{Days, NaiveDate};
+use chrono::{DateTime, Days, FixedOffset, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 const SCHEMA: &str = "
@@ -24,6 +24,15 @@ CREATE TABLE IF NOT EXISTS user_plans (
     daily_target INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (guild_id, user_id),
     CHECK ((next_surah IS NULL) = (next_ayah IS NULL))
+);
+
+CREATE TABLE IF NOT EXISTS reminders (
+    guild_id       TEXT NOT NULL,
+    user_id        TEXT NOT NULL,
+    time           TEXT NOT NULL,
+    offset_minutes INTEGER NOT NULL DEFAULT 0,
+    last_sent_day  TEXT,
+    PRIMARY KEY (guild_id, user_id)
 );
 ";
 
@@ -55,6 +64,20 @@ pub struct LeaderEntry {
     pub user_id: u64,
     pub total: u32,
     pub streak: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reminder {
+    pub guild_id: u64,
+    pub user_id: u64,
+    pub time: String,
+    pub offset_minutes: i32,
+    pub last_sent_day: Option<String>,
+}
+
+pub struct DueReminder {
+    pub reminder: Reminder,
+    pub day: String,
 }
 
 pub fn open(path: &str) -> Result<Connection> {
@@ -477,6 +500,171 @@ pub async fn leaderboard(
         Ok(entries)
     })
     .await?
+}
+
+fn read_reminder(
+    connection: &Connection,
+    guild_id: u64,
+    user_id: u64,
+) -> rusqlite::Result<Option<Reminder>> {
+    connection
+        .query_row(
+            "SELECT time, offset_minutes, last_sent_day FROM reminders
+             WHERE guild_id = ?1 AND user_id = ?2",
+            params![guild_id.to_string(), user_id.to_string()],
+            |row| {
+                Ok(Reminder {
+                    guild_id,
+                    user_id,
+                    time: row.get(0)?,
+                    offset_minutes: row.get(1)?,
+                    last_sent_day: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+}
+
+pub async fn get_reminder(
+    db: Arc<Mutex<Connection>>,
+    guild_id: u64,
+    user_id: u64,
+) -> Result<Option<Reminder>> {
+    tokio::task::spawn_blocking(move || {
+        let connection = lock(&db);
+        Ok(read_reminder(&connection, guild_id, user_id)?)
+    })
+    .await?
+}
+
+pub async fn set_reminder(
+    db: Arc<Mutex<Connection>>,
+    guild_id: u64,
+    user_id: u64,
+    time: &str,
+    offset_minutes: i32,
+) -> Result<()> {
+    let time = time.to_owned();
+
+    tokio::task::spawn_blocking(move || {
+        let connection = lock(&db);
+        connection.execute(
+            "INSERT INTO reminders (guild_id, user_id, time, offset_minutes)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (guild_id, user_id)
+             DO UPDATE SET time = excluded.time, offset_minutes = excluded.offset_minutes",
+            params![
+                guild_id.to_string(),
+                user_id.to_string(),
+                time,
+                offset_minutes
+            ],
+        )?;
+        Ok(())
+    })
+    .await?
+}
+
+pub async fn clear_reminder(
+    db: Arc<Mutex<Connection>>,
+    guild_id: u64,
+    user_id: u64,
+) -> Result<bool> {
+    tokio::task::spawn_blocking(move || {
+        let connection = lock(&db);
+        let removed = connection.execute(
+            "DELETE FROM reminders WHERE guild_id = ?1 AND user_id = ?2",
+            params![guild_id.to_string(), user_id.to_string()],
+        )?;
+        Ok(removed > 0)
+    })
+    .await?
+}
+
+pub async fn due_reminders(
+    db: Arc<Mutex<Connection>>,
+    now: DateTime<Utc>,
+) -> Result<Vec<DueReminder>> {
+    tokio::task::spawn_blocking(move || {
+        let connection = lock(&db);
+        let mut statement = connection.prepare(
+            "SELECT guild_id, user_id, time, offset_minutes, last_sent_day FROM reminders",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let guild_id: String = row.get(0)?;
+            let user_id: String = row.get(1)?;
+            Ok((
+                guild_id,
+                user_id,
+                row.get::<_, String>(2)?,
+                row.get::<_, i32>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+
+        let mut due = Vec::new();
+        for row in rows {
+            let (guild_id, user_id, time, offset_minutes, last_sent_day) = row?;
+            let (Ok(guild_id), Ok(user_id)) = (guild_id.parse::<u64>(), user_id.parse::<u64>())
+            else {
+                continue;
+            };
+            if let Some(day) = due_day(&time, offset_minutes, last_sent_day.as_deref(), now) {
+                due.push(DueReminder {
+                    reminder: Reminder {
+                        guild_id,
+                        user_id,
+                        time,
+                        offset_minutes,
+                        last_sent_day,
+                    },
+                    day,
+                });
+            }
+        }
+
+        Ok(due)
+    })
+    .await?
+}
+
+pub async fn mark_reminder_sent(
+    db: Arc<Mutex<Connection>>,
+    guild_id: u64,
+    user_id: u64,
+    day: &str,
+) -> Result<()> {
+    let day = day.to_owned();
+
+    tokio::task::spawn_blocking(move || {
+        let connection = lock(&db);
+        connection.execute(
+            "UPDATE reminders SET last_sent_day = ?3 WHERE guild_id = ?1 AND user_id = ?2",
+            params![guild_id.to_string(), user_id.to_string(), day],
+        )?;
+        Ok(())
+    })
+    .await?
+}
+
+fn due_day(
+    time: &str,
+    offset_minutes: i32,
+    last_sent_day: Option<&str>,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let offset = FixedOffset::east_opt(offset_minutes * 60)?;
+    let local = now.with_timezone(&offset);
+    let day = local.format("%Y-%m-%d").to_string();
+
+    if last_sent_day == Some(day.as_str()) {
+        return None;
+    }
+    if local.format("%H:%M").to_string().as_str() < time {
+        return None;
+    }
+
+    Some(day)
 }
 
 fn active_streak(known: &HashSet<NaiveDate>, today: NaiveDate) -> (u32, bool) {
@@ -913,6 +1101,60 @@ mod tests {
                 .total,
             1
         );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_reminder_is_due_once_per_local_day() {
+        let now: DateTime<Utc> = "2026-11-12T16:29:00Z".parse().unwrap();
+
+        assert_eq!(due_day("16:30", 0, None, now), None);
+        assert_eq!(
+            due_day("16:29", 0, None, now),
+            Some("2026-11-12".to_owned())
+        );
+        assert_eq!(due_day("16:29", 0, Some("2026-11-12"), now), None);
+
+        // UTC+08:00 is already the next day at 00:29.
+        assert_eq!(
+            due_day("00:00", 480, None, now),
+            Some("2026-11-13".to_owned())
+        );
+        assert_eq!(due_day("23:59", 480, None, now), None);
+    }
+
+    #[tokio::test]
+    async fn reminders_are_stored_per_server_and_sent_once() {
+        let (db, path) = test_db("reminders");
+
+        set_reminder(db.clone(), GUILD, 1, "06:00", 180)
+            .await
+            .unwrap();
+        set_reminder(db.clone(), GUILD, 1, "20:15", 180)
+            .await
+            .unwrap();
+
+        let reminder = get_reminder(db.clone(), GUILD, 1).await.unwrap().unwrap();
+        assert_eq!(reminder.time, "20:15");
+        assert_eq!(reminder.offset_minutes, 180);
+        assert_eq!(
+            get_reminder(db.clone(), OTHER_GUILD, 1).await.unwrap(),
+            None
+        );
+
+        let now: DateTime<Utc> = "2026-11-12T18:00:00Z".parse().unwrap();
+        let due = due_reminders(db.clone(), now).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].day, "2026-11-12");
+
+        mark_reminder_sent(db.clone(), GUILD, 1, &due[0].day)
+            .await
+            .unwrap();
+        assert!(due_reminders(db.clone(), now).await.unwrap().is_empty());
+
+        assert!(clear_reminder(db.clone(), GUILD, 1).await.unwrap());
+        assert!(!clear_reminder(db.clone(), GUILD, 1).await.unwrap());
 
         let _ = std::fs::remove_file(path);
     }
