@@ -5,6 +5,7 @@ mod components;
 mod data;
 mod db;
 mod quran;
+mod reminders;
 mod ui;
 
 use std::sync::{Arc, Mutex};
@@ -57,7 +58,8 @@ async fn main() -> Result<()> {
         .await
         .context("could not create the Discord client")?;
 
-    client.data.write().await.insert::<Data>(data);
+    client.data.write().await.insert::<Data>(data.clone());
+    tokio::spawn(reminders::run(client.http.clone(), data.db.clone()));
 
     info!("Wird is online");
     client.start().await.context("the Discord client stopped")?;

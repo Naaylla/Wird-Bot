@@ -298,6 +298,68 @@ pub async fn progress(ctx: &Context, command: &CommandInteraction) -> Result<()>
     Ok(())
 }
 
+pub async fn remind(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let Some(guild_id) = guild_id(command) else {
+        return reply_ephemeral(ctx, command, "Use this command in a server.").await;
+    };
+
+    let data = Data::from_context(ctx).await?;
+    let user_id = command.user.id.get();
+
+    if option_bool(command, "disable") == Some(true) {
+        let removed = db::clear_reminder(data.db.clone(), guild_id, user_id).await?;
+        let message = if removed {
+            "Your daily reminder is off."
+        } else {
+            "You did not have a daily reminder set."
+        };
+        return reply_ephemeral(ctx, command, message).await;
+    }
+
+    let existing = db::get_reminder(data.db.clone(), guild_id, user_id).await?;
+
+    let Some(raw_time) = option_string(command, "time") else {
+        let message = match existing {
+            Some(reminder) => format!(
+                "Your daily reminder is set for **{}** ({}). Use `/remind disable:true` to turn it off.",
+                reminder.time,
+                format_offset(reminder.offset_minutes)
+            ),
+            None => "No daily reminder set. Use `/remind time:19:30 offset:+03:00` to be reminded when your wird is unfinished.".to_owned(),
+        };
+        return reply_ephemeral(ctx, command, &message).await;
+    };
+
+    let Some(time) = parse_time(raw_time) else {
+        return reply_ephemeral(ctx, command, "Use a 24-hour time like `19:30`.").await;
+    };
+    let offset = match option_string(command, "offset") {
+        Some(raw) => match parse_offset(raw) {
+            Some(offset) => offset,
+            None => {
+                return reply_ephemeral(
+                    ctx,
+                    command,
+                    "Use a UTC offset like `+03:00`, `+05:30` or `-04:00`.",
+                )
+                .await;
+            }
+        },
+        None => existing
+            .as_ref()
+            .map(|reminder| reminder.offset_minutes)
+            .unwrap_or(0),
+    };
+
+    db::set_reminder(data.db.clone(), guild_id, user_id, &time, offset).await?;
+
+    let message = format!(
+        "Reminder set for **{time}** ({}). I will DM you when that day's wird is unfinished.",
+        format_offset(offset)
+    );
+    reply_ephemeral(ctx, command, &message).await
+}
+
 pub async fn help(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     command
         .create_response(
@@ -351,6 +413,18 @@ fn option_string<'a>(command: &'a CommandInteraction, name: &str) -> Option<&'a 
         })
 }
 
+fn option_bool(command: &CommandInteraction, name: &str) -> Option<bool> {
+    command
+        .data
+        .options
+        .iter()
+        .find(|option| option.name == name)
+        .and_then(|option| match &option.value {
+            CommandDataOptionValue::Boolean(value) => Some(*value),
+            _ => None,
+        })
+}
+
 fn option_integer(command: &CommandInteraction, name: &str) -> Option<i64> {
     command
         .data
@@ -383,6 +457,40 @@ fn ayah_to_show(
             .map(|(surah, ayah)| format!("{surah}:{ayah}"))
             .filter(|key| completed_today.contains(key)),
     }
+}
+
+fn parse_time(raw: &str) -> Option<String> {
+    let (hour, minute) = raw.trim().split_once(':')?;
+    let hour: u32 = hour.parse().ok()?;
+    let minute: u32 = minute.parse().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+
+    Some(format!("{hour:02}:{minute:02}"))
+}
+
+fn parse_offset(raw: &str) -> Option<i32> {
+    let raw = raw.trim();
+    let sign = match raw.chars().next()? {
+        '+' => 1,
+        '-' => -1,
+        _ => return None,
+    };
+    let (hour, minute) = raw[1..].split_once(':')?;
+    let hour: i32 = hour.parse().ok()?;
+    let minute: i32 = minute.parse().ok()?;
+    if hour > 14 || minute > 59 || (hour == 14 && minute > 0) {
+        return None;
+    }
+
+    Some(sign * (hour * 60 + minute))
+}
+
+fn format_offset(offset_minutes: i32) -> String {
+    let sign = if offset_minutes < 0 { '-' } else { '+' };
+    let offset = offset_minutes.abs();
+    format!("UTC{sign}{:02}:{:02}", offset / 60, offset % 60)
 }
 
 async fn reply_ephemeral(ctx: &Context, command: &CommandInteraction, message: &str) -> Result<()> {
@@ -441,6 +549,25 @@ mod tests {
 
     fn done(verses: &[&str]) -> Vec<String> {
         verses.iter().map(|verse| (*verse).to_owned()).collect()
+    }
+
+    #[test]
+    fn reminder_times_and_offsets_are_validated() {
+        assert_eq!(parse_time("19:30").as_deref(), Some("19:30"));
+        assert_eq!(parse_time("9:05").as_deref(), Some("09:05"));
+        assert_eq!(parse_time("24:00"), None);
+        assert_eq!(parse_time("19:60"), None);
+        assert_eq!(parse_time("19"), None);
+
+        assert_eq!(parse_offset("+03:00"), Some(180));
+        assert_eq!(parse_offset("+05:30"), Some(330));
+        assert_eq!(parse_offset("-04:00"), Some(-240));
+        assert_eq!(parse_offset("+14:30"), None);
+        assert_eq!(parse_offset("03:00"), None);
+
+        assert_eq!(format_offset(0), "UTC+00:00");
+        assert_eq!(format_offset(330), "UTC+05:30");
+        assert_eq!(format_offset(-240), "UTC-04:00");
     }
 
     #[test]

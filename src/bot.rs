@@ -67,6 +67,7 @@ async fn run_command(ctx: &Context, command: &CommandInteraction) -> Result<()> 
         "progress" => commands::progress(ctx, command).await,
         "leaderboard" => commands::leaderboard(ctx, command).await,
         "reset" => commands::reset(ctx, command).await,
+        "remind" => commands::remind(ctx, command).await,
         "help" => commands::help(ctx, command).await,
         other => {
             warn!("unknown command: {other}");
@@ -111,6 +112,31 @@ fn command_definitions() -> Vec<CreateCommand> {
         CreateCommand::new("leaderboard")
             .description("Show the server's daily memorization streak leaderboard"),
         CreateCommand::new("reset").description("Reset your progress and streak in this server"),
+        CreateCommand::new("remind")
+            .description("Get a daily DM when your wird is unfinished")
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "time",
+                    "Time in 24-hour HH:MM, e.g. 19:30",
+                )
+                .min_length(4)
+                .max_length(5),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "offset",
+                    "Your UTC offset, e.g. +03:00 or +05:30",
+                )
+                .min_length(6)
+                .max_length(6),
+            )
+            .add_option(CreateCommandOption::new(
+                CommandOptionType::Boolean,
+                "disable",
+                "Turn your daily reminder off",
+            )),
         CreateCommand::new("help").description("How Wird works and what each command does"),
     ]
 }
