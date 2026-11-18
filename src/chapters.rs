@@ -64,28 +64,6 @@ pub fn next_verse(
     }
 }
 
-pub fn previous_verse(
-    chapters: &ChapterList,
-    current: (u16, u16),
-    target_surah: Option<u16>,
-) -> Option<(u16, u16)> {
-    let (surah, ayah) = current;
-    let count = verse_count(chapters, surah)?;
-
-    if ayah == 0 || ayah > count || target_surah.is_some_and(|target| target != surah) {
-        return None;
-    }
-
-    if ayah > 1 {
-        Some((surah, ayah - 1))
-    } else if target_surah.is_none() && surah > 1 {
-        let previous_surah = surah - 1;
-        verse_count(chapters, previous_surah).map(|last_ayah| (previous_surah, last_ayah))
-    } else {
-        None
-    }
-}
-
 pub fn final_verse(chapters: &ChapterList, target_surah: Option<u16>) -> Option<(u16, u16)> {
     let surah = match target_surah {
         Some(surah) => surah,
@@ -124,8 +102,6 @@ mod tests {
         assert_eq!(next_verse(&chapters, (1, 7), None), Some((2, 1)));
         assert_eq!(next_verse(&chapters, (1, 7), Some(1)), None);
         assert_eq!(next_verse(&chapters, (114, 6), None), None);
-        assert_eq!(previous_verse(&chapters, (2, 1), None), Some((1, 7)));
-        assert_eq!(previous_verse(&chapters, (10, 1), Some(10)), None);
         assert_eq!(final_verse(&chapters, Some(10)), Some((10, 109)));
         assert_eq!(final_verse(&chapters, None), Some((114, 6)));
     }

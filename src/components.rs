@@ -1,8 +1,8 @@
 use anyhow::Result;
 use chrono::Utc;
 use serenity::all::{
-    ComponentInteraction, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
-    EditInteractionResponse,
+    ComponentInteraction, ComponentInteractionDataKind, Context, CreateInteractionResponse,
+    CreateInteractionResponseMessage, EditInteractionResponse,
 };
 use tracing::warn;
 
@@ -53,8 +53,29 @@ pub async fn handle(ctx: &Context, component: &ComponentInteraction) -> Result<(
             let step = parts.next().unwrap_or_default();
             reset(ctx, component, step).await
         }
+        "surah_page" => {
+            let page = parts.next().unwrap_or_default();
+            surah_page(ctx, component, page).await
+        }
+        "surah_select" => surah_select(ctx, component).await,
+        "help" => help(ctx, component).await,
         _ => Ok(()),
     }
+}
+
+async fn help(ctx: &Context, component: &ComponentInteraction) -> Result<()> {
+    component
+        .create_response(
+            ctx.http.clone(),
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .embed(ui::help_embed())
+                    .ephemeral(true),
+            ),
+        )
+        .await?;
+
+    Ok(())
 }
 
 async fn memorized(
@@ -82,17 +103,6 @@ async fn memorized(
     let data = Data::from_context(ctx).await?;
     let chapters = data.chapters.snapshot().await;
     let user_id = component.user.id.get();
-    if db::verse_for_day(data.db.clone(), guild_id, user_id, day)
-        .await?
-        .is_some()
-    {
-        return reply_ephemeral(
-            ctx,
-            component,
-            "You already memorized today's ayah. One ayah a day — come back tomorrow, in shaa Allah.",
-        )
-        .await;
-    }
 
     let Some(plan) = db::get_plan(data.db.clone(), guild_id, user_id).await? else {
         return reply_ephemeral(
@@ -120,6 +130,30 @@ async fn memorized(
         .await;
     }
 
+    let completed_today = db::verses_for_day(data.db.clone(), guild_id, user_id, day).await?;
+    if completed_today
+        .iter()
+        .any(|completed| completed == verse_key)
+    {
+        return reply_ephemeral(
+            ctx,
+            component,
+            "You already memorized this ayah today. Run `/wird` to continue, in shaa Allah.",
+        )
+        .await;
+    }
+    if completed_today.len() as u16 >= plan.daily_target {
+        return reply_ephemeral(
+            ctx,
+            component,
+            &format!(
+                "You have reached today's wird of {} ayah(s). Come back tomorrow, in shaa Allah.",
+                plan.daily_target
+            ),
+        )
+        .await;
+    }
+
     let next = chapters::next_verse(&chapters, current, plan.target_surah);
     let result = db::mark_done(
         data.db.clone(),
@@ -136,15 +170,24 @@ async fn memorized(
         db::MarkResult::Inserted => {
             let stats =
                 db::stats(data.db.clone(), guild_id, user_id, Utc::now().date_naive()).await?;
+            let completed = completed_today.len() as u16 + 1;
+            let follow_up = if completed < plan.daily_target {
+                "Run `/wird` again to continue."
+            } else {
+                "Your next ayah will be available tomorrow."
+            };
             format!(
-                "MashaAllah! You memorized {verse_key} today. Current streak: {} day(s). Your next ayah will be available tomorrow.",
-                stats.streak
+                "MashaAllah! You memorized {verse_key} today. {completed}/{} ayahs done. Current streak: {} day(s). {follow_up}",
+                plan.daily_target, stats.streak
             )
         }
         db::MarkResult::AlreadyDone => {
-            "You already memorized today's ayah. One ayah a day — come back tomorrow, in shaa Allah."
-                .to_owned()
+            "You already memorized this ayah today. Run `/wird` to continue.".to_owned()
         }
+        db::MarkResult::DailyLimit => format!(
+            "You have reached today's wird of {} ayah(s). Come back tomorrow, in shaa Allah.",
+            plan.daily_target
+        ),
         db::MarkResult::Stale => {
             "Your plan has changed. Run `/wird` to get your current ayah.".to_owned()
         }
@@ -158,6 +201,95 @@ async fn memorized(
             .say(&ctx.http, ui::memorization_announcement(user_id, verse_key))
             .await?;
     }
+
+    Ok(())
+}
+
+async fn surah_page(ctx: &Context, component: &ComponentInteraction, page: &str) -> Result<()> {
+    let data = Data::from_context(ctx).await?;
+    let chapters = data.chapters.snapshot().await;
+
+    let (content, components) = if chapters.is_empty() {
+        (
+            "The surah list is still loading. Please try again in a minute.".to_owned(),
+            Vec::new(),
+        )
+    } else {
+        ui::surah_picker(page.parse().unwrap_or(0), &chapters)
+    };
+
+    component
+        .create_response(
+            ctx.http.clone(),
+            CreateInteractionResponse::UpdateMessage(
+                CreateInteractionResponseMessage::new()
+                    .content(content)
+                    .components(components),
+            ),
+        )
+        .await?;
+
+    Ok(())
+}
+
+async fn surah_select(ctx: &Context, component: &ComponentInteraction) -> Result<()> {
+    let Some(guild_id) = component.guild_id else {
+        return reply_ephemeral(ctx, component, "Use this in a server.").await;
+    };
+
+    let ComponentInteractionDataKind::StringSelect { values } = &component.data.kind else {
+        return Ok(());
+    };
+    let Some(surah) = values.first().and_then(|value| value.parse::<u16>().ok()) else {
+        return reply_ephemeral(
+            ctx,
+            component,
+            "Choose a surah from the list to start a surah plan.",
+        )
+        .await;
+    };
+
+    let data = Data::from_context(ctx).await?;
+    let chapters = data.chapters.snapshot().await;
+    let Some(chapter) = chapters.get(&surah) else {
+        return reply_ephemeral(ctx, component, "That surah is not available right now.").await;
+    };
+
+    let plan = db::set_plan(
+        data.db.clone(),
+        guild_id.get(),
+        component.user.id.get(),
+        Some(surah),
+        None,
+    )
+    .await?;
+
+    let pace = if plan.daily_target == 1 {
+        "1 ayah per day".to_owned()
+    } else {
+        format!("{} ayahs per day", plan.daily_target)
+    };
+    let message = match plan.next_verse {
+        Some((next_surah, ayah)) => format!(
+            "Your personal plan is set to memorize {} in order, {pace}. Your current ayah is {next_surah}:{ayah}. Use `/wird` to read it.",
+            chapter.name
+        ),
+        None => format!(
+            "You have completed {}. Choose a plan again when you are ready to start another.",
+            chapter.name
+        ),
+    };
+
+    component
+        .create_response(
+            ctx.http.clone(),
+            CreateInteractionResponse::UpdateMessage(
+                CreateInteractionResponseMessage::new()
+                    .content(message)
+                    .components(Vec::new()),
+            ),
+        )
+        .await?;
 
     Ok(())
 }

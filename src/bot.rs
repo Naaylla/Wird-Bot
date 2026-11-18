@@ -1,8 +1,8 @@
 use anyhow::Result;
 use serenity::all::{
     Command, CommandInteraction, CommandOptionType, ComponentInteraction, Context, CreateCommand,
-    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage, Guild,
-    GuildId, Interaction, Ready,
+    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage,
+    CreateMessage, Guild, GuildId, Interaction, Ready,
 };
 use serenity::async_trait;
 use serenity::prelude::EventHandler;
@@ -10,6 +10,7 @@ use tracing::{error, info, warn};
 
 use crate::commands;
 use crate::components;
+use crate::ui;
 
 pub struct Handler;
 
@@ -27,8 +28,12 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: Option<bool>) {
+    async fn guild_create(&self, ctx: Context, guild: Guild, is_new: Option<bool>) {
         register_commands(&ctx, guild.id).await;
+
+        if is_new == Some(true) {
+            send_intro(&ctx, &guild).await;
+        }
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -62,6 +67,7 @@ async fn run_command(ctx: &Context, command: &CommandInteraction) -> Result<()> 
         "progress" => commands::progress(ctx, command).await,
         "leaderboard" => commands::leaderboard(ctx, command).await,
         "reset" => commands::reset(ctx, command).await,
+        "help" => commands::help(ctx, command).await,
         other => {
             warn!("unknown command: {other}");
             Ok(())
@@ -90,13 +96,44 @@ fn command_definitions() -> Vec<CreateCommand> {
                     "Search for a surah to memorize",
                 )
                 .set_autocomplete(true),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::Integer,
+                    "daily",
+                    "How many ayahs to memorize each day (1-10)",
+                )
+                .min_int_value(1)
+                .max_int_value(10),
             ),
         CreateCommand::new("wird").description("Show your current ayah and memorization buttons"),
         CreateCommand::new("progress").description("Show your memorized count and daily streak"),
         CreateCommand::new("leaderboard")
             .description("Show the server's daily memorization streak leaderboard"),
         CreateCommand::new("reset").description("Reset your progress and streak in this server"),
+        CreateCommand::new("help").description("How Wird works and what each command does"),
     ]
+}
+
+async fn send_intro(ctx: &Context, guild: &Guild) {
+    let Some(channel_id) = guild.system_channel_id else {
+        warn!(
+            "guild {} has no system channel; skipping the introduction panel",
+            guild.id
+        );
+        return;
+    };
+
+    let message = CreateMessage::new()
+        .embed(ui::intro_embed())
+        .components(vec![ui::intro_buttons()]);
+
+    if let Err(err) = channel_id.send_message(&ctx.http, message).await {
+        warn!(
+            "could not send the introduction panel in guild {}: {err}",
+            guild.id
+        );
+    }
 }
 
 async fn register_commands(ctx: &Context, guild_id: GuildId) {

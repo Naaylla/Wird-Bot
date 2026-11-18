@@ -1,19 +1,24 @@
 use chrono::NaiveDate;
-use serenity::all::{ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedFooter};
+use serenity::all::{
+    ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedFooter, CreateSelectMenu,
+    CreateSelectMenuKind, CreateSelectMenuOption,
+};
 
-use crate::chapters::Chapter;
+use crate::chapters::{Chapter, ChapterList};
 use crate::db::LeaderEntry;
 use crate::quran::{self, Ayah};
 
 const GREEN: u32 = 0x2E_CC_71;
+const SURAHS_PER_PAGE: usize = 25;
 const BASMALA: &str = "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ";
 
 pub fn daily_embed(
-    day: NaiveDate,
     ayah: &Ayah,
     chapter: Option<&Chapter>,
     done: bool,
     blocked_today: bool,
+    completed: u16,
+    target: u16,
 ) -> CreateEmbed {
     let (surah, ayah_number) = quran::verse_parts(&ayah.verse_key);
     let title = match chapter {
@@ -28,14 +33,20 @@ pub fn daily_embed(
         daily_arabic(ayah),
         clean_text(&ayah.translation)
     );
-    let footer = if done {
-        format!("Memorized on {day}. Your next ayah is available tomorrow.")
+    let footer = if done && completed >= target {
+        format!(
+            "Today's wird complete: {completed}/{target} ayahs. Return tomorrow, in shaa Allah."
+        )
+    } else if done {
+        format!("{completed}/{target} ayahs memorized today. Run /wird again to continue.")
     } else if blocked_today {
-        "You already memorized a different ayah today. Your current plan continues tomorrow."
-            .to_owned()
+        format!("You reached today's target ({completed}/{target}). Come back tomorrow.")
     } else {
-        "Click \"Memorized\" when you have learned this ayah. Your sequence advances the next day."
-            .to_owned()
+        format!(
+            "Ayah {} of {} for today. Tap \"Memorized\" when you have learned it.",
+            completed + 1,
+            target
+        )
     };
 
     CreateEmbed::new()
@@ -91,6 +102,49 @@ pub fn progress_embed(total: u32, streak: u32, done_today: bool) -> CreateEmbed 
         .footer(CreateEmbedFooter::new("One ayah a day"))
 }
 
+pub fn help_embed() -> CreateEmbed {
+    CreateEmbed::new()
+        .title("Wird — how it works")
+        .description(
+            "**One ayah at a time, every day.**\n\n\
+             1. Choose a plan with `/plan` — the full Qur'an or one surah, and how many ayahs per day (1–10).\n\
+             2. Run `/wird` each day to see your next ayah.\n\
+             3. Tap **Memorized** once you have learned it. Your plan moves on.\n\n\
+             **Commands**\n\
+             `/plan` — choose the full Qur'an or one surah, and your daily size\n\
+             `/wird` — show your current ayah and mark it memorized\n\
+             `/progress` — see your total and daily streak\n\
+             `/leaderboard` — the server's streak leaderboard\n\
+             `/reset` — reset your progress in this server\n\
+             `/help` — this message",
+        )
+        .colour(GREEN)
+        .footer(CreateEmbedFooter::new("One ayah a day"))
+}
+
+pub fn intro_embed() -> CreateEmbed {
+    CreateEmbed::new()
+        .title("Welcome to Wird")
+        .description(
+            "**Assalamu alaikum!** I help your server memorize the Qur'an together — one ayah at a time.\n\n\
+             **How it works**\n\
+             1. `/plan` — choose the full Qur'an or a single surah, and how many ayahs per day (1–10).\n\
+             2. `/wird` — get your next ayah with its Arabic text and translation.\n\
+             3. Tap **Memorized** when you have learned it. Come back daily to grow your streak.\n\n\
+             **Commands**\n\
+             `/plan` · `/wird` · `/progress` · `/leaderboard` · `/reset` · `/help`\n\n\
+             Start with `/plan`, and may Allah make it easy for you.",
+        )
+        .colour(GREEN)
+        .footer(CreateEmbedFooter::new("One ayah a day · /help for everything"))
+}
+
+pub fn intro_buttons() -> CreateActionRow {
+    CreateActionRow::Buttons(vec![CreateButton::new("wird|help")
+        .label("How it works")
+        .style(ButtonStyle::Secondary)])
+}
+
 pub fn leaderboard_embed(entries: &[LeaderEntry], today: NaiveDate) -> CreateEmbed {
     let description = if entries.is_empty() {
         "No one has memorized an ayah yet. Be the first — run `/wird`.".to_owned()
@@ -126,6 +180,61 @@ fn plural(count: u32, word: &str) -> String {
     } else {
         format!("{count} {word}s")
     }
+}
+
+pub fn surah_picker(page: usize, chapters: &ChapterList) -> (String, Vec<CreateActionRow>) {
+    let pages = surah_page_count(chapters).max(1);
+    let page = page.min(pages - 1);
+    let (start, end) = surah_page_bounds(page, chapters.len());
+
+    let options = chapters
+        .iter()
+        .skip(start)
+        .take(end - start)
+        .map(|(surah, chapter)| {
+            CreateSelectMenuOption::new(format!("{surah}. {}", chapter.name), surah.to_string())
+                .description(format!("{} · {} ayahs", chapter.arabic, chapter.verses))
+        })
+        .collect();
+
+    let menu = CreateSelectMenu::new(
+        "wird|surah_select",
+        CreateSelectMenuKind::String { options },
+    )
+    .placeholder("Choose a surah");
+
+    let previous = CreateButton::new(format!("wird|surah_page|{}", page.saturating_sub(1)))
+        .label("Previous")
+        .style(ButtonStyle::Secondary)
+        .disabled(page == 0);
+    let next = CreateButton::new(format!("wird|surah_page|{}", page + 1))
+        .label("Next")
+        .style(ButtonStyle::Secondary)
+        .disabled(page + 1 >= pages);
+
+    let content = format!(
+        "Choose the surah you want to memorize. Page {}/{} · {} surahs",
+        page + 1,
+        pages,
+        chapters.len()
+    );
+
+    (
+        content,
+        vec![
+            CreateActionRow::SelectMenu(menu),
+            CreateActionRow::Buttons(vec![previous, next]),
+        ],
+    )
+}
+
+fn surah_page_count(chapters: &ChapterList) -> usize {
+    chapters.len().div_ceil(SURAHS_PER_PAGE)
+}
+
+fn surah_page_bounds(page: usize, total: usize) -> (usize, usize) {
+    let start = page * SURAHS_PER_PAGE;
+    (start, (start + SURAHS_PER_PAGE).min(total))
 }
 
 pub fn daily_buttons(
@@ -192,7 +301,7 @@ pub fn reset_cancel_button() -> CreateActionRow {
 
 pub fn clean_text(input: &str) -> String {
     let without_notes = remove_tag_blocks(input, "sup");
-    normalize(&strip_tags(&without_notes))
+    escape_markdown(&normalize(&strip_tags(&without_notes)))
 }
 
 pub fn clean_tafsir(input: &str) -> String {
@@ -208,7 +317,24 @@ pub fn clean_tafsir(input: &str) -> String {
         .replace("<br/>", "\n")
         .replace("<br />", "\n");
 
-    normalize(&strip_tags(&with_breaks))
+    escape_markdown(&normalize(&strip_tags(&with_breaks)))
+}
+
+fn escape_markdown(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+
+    for character in input.chars() {
+        match character {
+            '`' => output.push('\''),
+            '\\' | '*' | '_' | '~' | '>' | '#' | '[' | ']' => {
+                output.push('\\');
+                output.push(character);
+            }
+            _ => output.push(character),
+        }
+    }
+
+    output
 }
 
 fn remove_tag_blocks(input: &str, tag: &str) -> String {
@@ -299,6 +425,14 @@ mod tests {
     }
 
     #[test]
+    fn tafsir_backticks_do_not_become_code_blocks() {
+        assert_eq!(
+            clean_tafsir("<p>Imam Ahmad recorded that `A'ishah said, \"Hi.\"</p>"),
+            "Imam Ahmad recorded that 'A'ishah said, \"Hi.\""
+        );
+    }
+
+    #[test]
     fn translation_footnotes_are_removed() {
         assert_eq!(
             clean_text("Allah<sup foot_note=1>2</sup> is One."),
@@ -313,6 +447,27 @@ mod tests {
         assert!(message.contains("<@123>"));
         assert!(message.contains("**2:255**"));
         assert_eq!(message.matches("<@").count(), 1);
+    }
+
+    #[test]
+    fn surah_pages_cover_every_surah_once() {
+        let chapters: ChapterList = (1..=114)
+            .map(|surah| {
+                (
+                    surah,
+                    Chapter {
+                        name: format!("Surah {surah}"),
+                        arabic: String::new(),
+                        verses: 3,
+                    },
+                )
+            })
+            .collect();
+
+        assert_eq!(surah_page_count(&chapters), 5);
+        assert_eq!(surah_page_bounds(0, chapters.len()), (0, 25));
+        assert_eq!(surah_page_bounds(4, chapters.len()), (100, 114));
+        assert_eq!(surah_page_count(&ChapterList::new()), 0);
     }
 
     #[test]

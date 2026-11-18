@@ -63,14 +63,40 @@ pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     let target_surah = match mode {
         "quran" => None,
         "surah" => {
-            let Some(surah) = option_string(command, "surah")
-                .and_then(|value| value.parse::<u16>().ok())
+            let Some(value) = option_string(command, "surah") else {
+                if chapters.is_empty() {
+                    return reply_ephemeral(
+                        ctx,
+                        command,
+                        "The surah list is still loading. Please try again in a minute.",
+                    )
+                    .await;
+                }
+
+                let (content, components) = ui::surah_picker(0, &chapters);
+                command
+                    .create_response(
+                        ctx.http.clone(),
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(content)
+                                .components(components)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await?;
+                return Ok(());
+            };
+
+            let Some(surah) = value
+                .parse::<u16>()
+                .ok()
                 .filter(|surah| chapters.contains_key(surah))
             else {
                 return reply_ephemeral(
                     ctx,
                     command,
-                    "Choose a surah from the autocomplete list to start a surah plan.",
+                    "Choose a surah from the list to start a surah plan.",
                 )
                 .await;
             };
@@ -91,6 +117,7 @@ pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
         guild_id,
         command.user.id.get(),
         target_surah,
+        option_integer(command, "daily").map(|value| value.clamp(1, 10) as u16),
     )
     .await?;
     let name = match target_surah {
@@ -100,9 +127,14 @@ pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
             .unwrap_or("the selected surah"),
         None => "the full Qur'an",
     };
+    let pace = if plan.daily_target == 1 {
+        "1 ayah per day".to_owned()
+    } else {
+        format!("{} ayahs per day", plan.daily_target)
+    };
     let message = match plan.next_verse {
         Some((surah, ayah)) => format!(
-            "Your personal plan is set to memorize {name} in order. Your current ayah is {surah}:{ayah}. Use `/wird` to read it."
+            "Your personal plan is set to memorize {name} in order, {pace}. Your current ayah is {surah}:{ayah}. Use `/wird` to read it."
         ),
         None => format!(
             "You have completed {name}. Choose a plan again when you are ready to start another."
@@ -132,33 +164,50 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     let day = Utc::now().date_naive();
     let day_string = day.format("%Y-%m-%d").to_string();
     let completed_today =
-        db::verse_for_day(data.db.clone(), guild_id, user_id, &day_string).await?;
-    let done = completed_today
-        .as_deref()
-        .is_some_and(|completed| is_current_plan_ayah(&chapters, plan, completed));
-    let blocked_today = completed_today.is_some() && !done;
-    let verse_key = match (done, completed_today.as_deref()) {
-        (true, Some(verse_key)) => verse_key.to_owned(),
-        _ => match plan.next_verse {
-            Some((surah, ayah)) => format!("{surah}:{ayah}"),
-            None => {
-                let message = match plan.target_surah {
-                    Some(surah) => format!(
-                        "You have finished Surah {}. Use `/plan` to choose another plan.",
-                        chapters
-                            .get(&surah)
-                            .map(|chapter| chapter.name.as_str())
-                            .unwrap_or("you selected")
-                    ),
-                    None => {
-                        "You have finished the whole Qur'an. Use `/plan` if you would like to begin again."
-                            .to_owned()
-                    }
-                };
-                return reply_ephemeral(ctx, command, &message).await;
+        db::verses_for_day(data.db.clone(), guild_id, user_id, &day_string).await?;
+    let completed = completed_today.len() as u16;
+    let target = plan.daily_target;
+    let reached_target = completed >= target;
+
+    let verse_key = match plan.next_verse {
+        Some((surah, ayah)) => {
+            if reached_target {
+                completed_today
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| format!("{surah}:{ayah}"))
+            } else {
+                format!("{surah}:{ayah}")
             }
-        },
+        }
+        None => {
+            let finished = chapters::final_verse(&chapters, plan.target_surah)
+                .map(|(surah, ayah)| format!("{surah}:{ayah}"))
+                .filter(|key| completed_today.contains(key));
+
+            match finished {
+                Some(key) => key,
+                None => {
+                    let message = match plan.target_surah {
+                        Some(surah) => format!(
+                            "You have finished Surah {}. Use `/plan` to choose another plan.",
+                            chapters
+                                .get(&surah)
+                                .map(|chapter| chapter.name.as_str())
+                                .unwrap_or("you selected")
+                        ),
+                        None => {
+                            "You have finished the whole Qur'an. Use `/plan` if you would like to begin again."
+                                .to_owned()
+                        }
+                    };
+                    return reply_ephemeral(ctx, command, &message).await;
+                }
+            }
+        }
     };
+    let done = completed_today.contains(&verse_key);
+    let blocked_today = reached_target && !done;
 
     command
         .create_response(
@@ -191,7 +240,14 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
         .edit_response(
             ctx.http.clone(),
             EditInteractionResponse::new()
-                .embed(ui::daily_embed(day, &ayah, chapter, done, blocked_today))
+                .embed(ui::daily_embed(
+                    &ayah,
+                    chapter,
+                    done,
+                    blocked_today,
+                    completed,
+                    target,
+                ))
                 .components(vec![ui::daily_buttons(
                     day,
                     &ayah.verse_key,
@@ -262,6 +318,21 @@ pub async fn progress(ctx: &Context, command: &CommandInteraction) -> Result<()>
     Ok(())
 }
 
+pub async fn help(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    command
+        .create_response(
+            ctx.http.clone(),
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .embed(ui::help_embed())
+                    .ephemeral(true),
+            ),
+        )
+        .await?;
+
+    Ok(())
+}
+
 pub async fn reset(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     let Some(_guild_id) = guild_id(command) else {
         return reply_ephemeral(ctx, command, "Use this command in a server.").await;
@@ -300,20 +371,16 @@ fn option_string<'a>(command: &'a CommandInteraction, name: &str) -> Option<&'a 
         })
 }
 
-fn is_current_plan_ayah(
-    chapters: &chapters::ChapterList,
-    plan: db::Plan,
-    completed_verse: &str,
-) -> bool {
-    let expected = match plan.next_verse {
-        Some(current) => chapters::previous_verse(chapters, current, plan.target_surah),
-        None => chapters::final_verse(chapters, plan.target_surah),
-    };
-
-    expected
-        .map(|(surah, ayah)| format!("{surah}:{ayah}"))
-        .as_deref()
-        == Some(completed_verse)
+fn option_integer(command: &CommandInteraction, name: &str) -> Option<i64> {
+    command
+        .data
+        .options
+        .iter()
+        .find(|option| option.name == name)
+        .and_then(|option| match &option.value {
+            CommandDataOptionValue::Integer(value) => Some(*value),
+            _ => None,
+        })
 }
 
 async fn reply_ephemeral(ctx: &Context, command: &CommandInteraction, message: &str) -> Result<()> {
@@ -329,42 +396,4 @@ async fn reply_ephemeral(ctx: &Context, command: &CommandInteraction, message: &
         .await?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_previous_plan_completion_does_not_replace_the_new_plan_ayah() {
-        let chapters: chapters::ChapterList = [(
-            10,
-            chapters::Chapter {
-                name: "Yunus".to_owned(),
-                arabic: "يونس".to_owned(),
-                verses: 109,
-            },
-        )]
-        .into_iter()
-        .collect();
-
-        let plan = db::Plan {
-            target_surah: Some(10),
-            next_verse: Some((10, 1)),
-        };
-        assert!(!is_current_plan_ayah(&chapters, plan, "31:11"));
-        assert!(!is_current_plan_ayah(&chapters, plan, "10:1"));
-
-        let next_ayah = db::Plan {
-            target_surah: Some(10),
-            next_verse: Some((10, 2)),
-        };
-        assert!(is_current_plan_ayah(&chapters, next_ayah, "10:1"));
-
-        let completed_surah = db::Plan {
-            target_surah: Some(10),
-            next_verse: None,
-        };
-        assert!(is_current_plan_ayah(&chapters, completed_surah, "10:109"));
-    }
 }

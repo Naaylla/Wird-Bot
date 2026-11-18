@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS memorizations (
     day        TEXT NOT NULL,
     verse_key  TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (guild_id, user_id, day)
+    PRIMARY KEY (guild_id, user_id, day, verse_key)
 );
 
 CREATE TABLE IF NOT EXISTS user_plans (
@@ -21,23 +21,27 @@ CREATE TABLE IF NOT EXISTS user_plans (
     target_surah INTEGER,
     next_surah   INTEGER,
     next_ayah    INTEGER,
+    daily_target INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (guild_id, user_id),
     CHECK ((next_surah IS NULL) = (next_ayah IS NULL))
 );
 ";
 
 const LEGACY_GUILD_ID: &str = "legacy";
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Plan {
     pub target_surah: Option<u16>,
     pub next_verse: Option<(u16, u16)>,
+    pub daily_target: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkResult {
     Inserted,
     AlreadyDone,
+    DailyLimit,
     Stale,
 }
 
@@ -57,7 +61,42 @@ pub fn open(path: &str) -> Result<Connection> {
     let connection = Connection::open(path)?;
     migrate(&connection)?;
     connection.execute_batch(SCHEMA)?;
+    upgrade(&connection)?;
     Ok(connection)
+}
+
+fn upgrade(connection: &Connection) -> Result<()> {
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version >= SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    let transaction = connection.unchecked_transaction()?;
+
+    if !column_exists(&transaction, "user_plans", "daily_target")? {
+        transaction.execute_batch(
+            "ALTER TABLE user_plans ADD COLUMN daily_target INTEGER NOT NULL DEFAULT 1",
+        )?;
+    }
+
+    transaction.execute_batch(
+        "ALTER TABLE memorizations RENAME TO memorizations_old;
+         CREATE TABLE memorizations (
+             guild_id   TEXT NOT NULL,
+             user_id    TEXT NOT NULL,
+             day        TEXT NOT NULL,
+             verse_key  TEXT NOT NULL,
+             created_at TEXT NOT NULL DEFAULT (datetime('now')),
+             PRIMARY KEY (guild_id, user_id, day, verse_key)
+         );
+         INSERT OR IGNORE INTO memorizations (guild_id, user_id, day, verse_key, created_at)
+             SELECT guild_id, user_id, day, verse_key, created_at FROM memorizations_old;
+         DROP TABLE memorizations_old;
+         PRAGMA user_version = 2;",
+    )?;
+
+    transaction.commit()?;
+    Ok(())
 }
 
 fn migrate(connection: &Connection) -> Result<()> {
@@ -135,16 +174,18 @@ fn read_plan(
 ) -> rusqlite::Result<Option<Plan>> {
     connection
         .query_row(
-            "SELECT target_surah, next_surah, next_ayah FROM user_plans
+            "SELECT target_surah, next_surah, next_ayah, daily_target FROM user_plans
              WHERE guild_id = ?1 AND user_id = ?2",
             params![guild_id.to_string(), user_id.to_string()],
             |row| {
                 let target_surah = row.get(0)?;
                 let next_surah: Option<u16> = row.get(1)?;
                 let next_ayah: Option<u16> = row.get(2)?;
+                let daily_target = row.get(3)?;
                 Ok(Plan {
                     target_surah,
                     next_verse: next_surah.zip(next_ayah),
+                    daily_target,
                 })
             },
         )
@@ -168,58 +209,83 @@ pub async fn set_plan(
     guild_id: u64,
     user_id: u64,
     target_surah: Option<u16>,
+    daily_target: Option<u16>,
 ) -> Result<Plan> {
     tokio::task::spawn_blocking(move || {
         let connection = lock(&db);
-        if let Some(plan) = read_plan(&connection, guild_id, user_id)? {
+        let existing = read_plan(&connection, guild_id, user_id)?;
+        let daily_target = daily_target
+            .or(existing.map(|plan| plan.daily_target))
+            .unwrap_or(1)
+            .clamp(1, 10);
+
+        if let Some(plan) = existing {
             if plan.target_surah == target_surah && plan.next_verse.is_some() {
+                if plan.daily_target != daily_target {
+                    connection.execute(
+                        "UPDATE user_plans SET daily_target = ?3
+                         WHERE guild_id = ?1 AND user_id = ?2",
+                        params![guild_id.to_string(), user_id.to_string(), daily_target],
+                    )?;
+                    return Ok(Plan {
+                        daily_target,
+                        ..plan
+                    });
+                }
                 return Ok(plan);
             }
         }
 
         let (surah, ayah) = (target_surah.unwrap_or(1), 1);
         connection.execute(
-            "INSERT INTO user_plans (guild_id, user_id, target_surah, next_surah, next_ayah)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO user_plans
+                 (guild_id, user_id, target_surah, next_surah, next_ayah, daily_target)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(guild_id, user_id) DO UPDATE SET
                  target_surah = excluded.target_surah,
                  next_surah = excluded.next_surah,
-                 next_ayah = excluded.next_ayah",
+                 next_ayah = excluded.next_ayah,
+                 daily_target = excluded.daily_target",
             params![
                 guild_id.to_string(),
                 user_id.to_string(),
                 target_surah,
                 surah,
-                ayah
+                ayah,
+                daily_target
             ],
         )?;
 
         Ok(Plan {
             target_surah,
             next_verse: Some((surah, ayah)),
+            daily_target,
         })
     })
     .await?
 }
 
-pub async fn verse_for_day(
+pub async fn verses_for_day(
     db: Arc<Mutex<Connection>>,
     guild_id: u64,
     user_id: u64,
     day: &str,
-) -> Result<Option<String>> {
+) -> Result<Vec<String>> {
     let day = day.to_owned();
 
     tokio::task::spawn_blocking(move || {
         let connection = lock(&db);
-        Ok(connection
-            .query_row(
-                "SELECT verse_key FROM memorizations
-                 WHERE guild_id = ?1 AND user_id = ?2 AND day = ?3",
-                params![guild_id.to_string(), user_id.to_string(), day],
-                |row| row.get(0),
-            )
-            .optional()?)
+        let mut statement = connection.prepare(
+            "SELECT verse_key FROM memorizations
+             WHERE guild_id = ?1 AND user_id = ?2 AND day = ?3
+             ORDER BY rowid",
+        )?;
+        let rows = statement.query_map(
+            params![guild_id.to_string(), user_id.to_string(), day],
+            |row| row.get(0),
+        )?;
+
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
     })
     .await?
 }
@@ -242,8 +308,8 @@ pub async fn mark_done(
 
         let already_done: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM memorizations
-             WHERE guild_id = ?1 AND user_id = ?2 AND day = ?3)",
-            params![guild_id.to_string(), user_id.to_string(), day],
+             WHERE guild_id = ?1 AND user_id = ?2 AND day = ?3 AND verse_key = ?4)",
+            params![guild_id.to_string(), user_id.to_string(), day, verse_key],
             |row| row.get(0),
         )?;
         if already_done {
@@ -257,6 +323,16 @@ pub async fn mark_done(
                 != Some(verse_key.clone())
         {
             return Ok(MarkResult::Stale);
+        }
+
+        let done_today: u16 = transaction.query_row(
+            "SELECT COUNT(*) FROM memorizations
+             WHERE guild_id = ?1 AND user_id = ?2 AND day = ?3",
+            params![guild_id.to_string(), user_id.to_string(), day],
+            |row| row.get(0),
+        )?;
+        if done_today >= expected_plan.daily_target {
+            return Ok(MarkResult::DailyLimit);
         }
 
         transaction.execute(
@@ -441,14 +517,14 @@ mod tests {
     #[tokio::test]
     async fn a_user_advances_only_after_marking_one_ayah_per_day() {
         let (db, path) = test_db("test");
-        let plan = set_plan(db.clone(), GUILD, 1, None).await.unwrap();
+        let plan = set_plan(db.clone(), GUILD, 1, None, None).await.unwrap();
 
         assert_eq!(plan.next_verse, Some((1, 1)));
         assert_eq!(
-            verse_for_day(db.clone(), GUILD, 1, "2026-11-12")
+            verses_for_day(db.clone(), GUILD, 1, "2026-11-12")
                 .await
                 .unwrap(),
-            None
+            Vec::<String>::new()
         );
         assert_eq!(
             mark_done(
@@ -468,10 +544,10 @@ mod tests {
         let next_plan = get_plan(db.clone(), GUILD, 1).await.unwrap().unwrap();
         assert_eq!(next_plan.next_verse, Some((1, 2)));
         assert_eq!(
-            verse_for_day(db.clone(), GUILD, 1, "2026-11-12")
+            verses_for_day(db.clone(), GUILD, 1, "2026-11-12")
                 .await
                 .unwrap(),
-            Some("1:1".to_owned())
+            vec!["1:1".to_owned()]
         );
         assert_eq!(
             mark_done(
@@ -485,7 +561,7 @@ mod tests {
             )
             .await
             .unwrap(),
-            MarkResult::AlreadyDone
+            MarkResult::DailyLimit
         );
         assert_eq!(
             get_plan(db.clone(), GUILD, 1)
@@ -506,10 +582,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_plan_can_require_multiple_ayahs_per_day() {
+        let (db, path) = test_db("multi");
+        let mut plan = set_plan(db.clone(), GUILD, 1, Some(1), Some(3))
+            .await
+            .unwrap();
+        assert_eq!(plan.daily_target, 3);
+
+        for (verse_key, next_verse) in [
+            ("1:1", Some((1, 2))),
+            ("1:2", Some((1, 3))),
+            ("1:3", Some((1, 4))),
+        ] {
+            assert_eq!(
+                mark_done(
+                    db.clone(),
+                    GUILD,
+                    1,
+                    "2026-11-12",
+                    verse_key,
+                    plan,
+                    next_verse
+                )
+                .await
+                .unwrap(),
+                MarkResult::Inserted
+            );
+            plan = get_plan(db.clone(), GUILD, 1).await.unwrap().unwrap();
+        }
+
+        assert_eq!(
+            verses_for_day(db.clone(), GUILD, 1, "2026-11-12")
+                .await
+                .unwrap(),
+            vec!["1:1".to_owned(), "1:2".to_owned(), "1:3".to_owned()]
+        );
+        assert_eq!(
+            mark_done(
+                db.clone(),
+                GUILD,
+                1,
+                "2026-11-12",
+                "1:4",
+                plan,
+                Some((1, 5))
+            )
+            .await
+            .unwrap(),
+            MarkResult::DailyLimit
+        );
+        assert_eq!(plan.next_verse, Some((1, 4)));
+
+        let stats = stats(db, GUILD, 1, NaiveDate::from_ymd_opt(2026, 11, 12).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(stats.total, 3);
+        assert_eq!(stats.streak, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn each_user_keeps_an_independent_plan_and_surah_plans_stop_at_the_end() {
         let (db, path) = test_db("plans");
-        let first = set_plan(db.clone(), GUILD, 1, None).await.unwrap();
-        let second = set_plan(db.clone(), GUILD, 2, Some(2)).await.unwrap();
+        let first = set_plan(db.clone(), GUILD, 1, None, None).await.unwrap();
+        let second = set_plan(db.clone(), GUILD, 2, Some(2), None).await.unwrap();
 
         assert_eq!(first.next_verse, Some((1, 1)));
         assert_eq!(second.next_verse, Some((2, 1)));
@@ -544,21 +680,21 @@ mod tests {
             Some((2, 1))
         );
         assert_eq!(
-            set_plan(db.clone(), GUILD, 1, None)
+            set_plan(db.clone(), GUILD, 1, None, None)
                 .await
                 .unwrap()
                 .next_verse,
             Some((1, 2))
         );
         assert_eq!(
-            set_plan(db.clone(), GUILD, 1, Some(3))
+            set_plan(db.clone(), GUILD, 1, Some(3), None)
                 .await
                 .unwrap()
                 .next_verse,
             Some((3, 1))
         );
 
-        let mut final_ayah = set_plan(db.clone(), GUILD, 3, Some(1)).await.unwrap();
+        let mut final_ayah = set_plan(db.clone(), GUILD, 3, Some(1), None).await.unwrap();
         for (day, verse_key, next_verse) in [
             ("2026-11-06", "1:1", Some((1, 2))),
             ("2026-11-07", "1:2", Some((1, 3))),
@@ -578,6 +714,7 @@ mod tests {
         let completed = Plan {
             target_surah: Some(1),
             next_verse: None,
+            daily_target: 1,
         };
         assert_eq!(
             mark_done(db.clone(), GUILD, 3, "2026-11-12", "1:7", final_ayah, None)
@@ -595,9 +732,9 @@ mod tests {
     #[tokio::test]
     async fn leaderboard_ranks_by_current_streak() {
         let (db, path) = test_db("leader");
-        set_plan(db.clone(), GUILD, 1, None).await.unwrap();
-        set_plan(db.clone(), GUILD, 2, None).await.unwrap();
-        set_plan(db.clone(), GUILD, 3, None).await.unwrap();
+        set_plan(db.clone(), GUILD, 1, None, None).await.unwrap();
+        set_plan(db.clone(), GUILD, 2, None, None).await.unwrap();
+        set_plan(db.clone(), GUILD, 3, None, None).await.unwrap();
 
         for (day, verse, next) in [
             ("2026-11-10", "1:1", Some((1, 2))),
@@ -658,8 +795,10 @@ mod tests {
     #[tokio::test]
     async fn each_server_keeps_its_own_plan_and_progress_for_the_same_user() {
         let (db, path) = test_db("guilds");
-        let here = set_plan(db.clone(), GUILD, 1, None).await.unwrap();
-        let there = set_plan(db.clone(), OTHER_GUILD, 1, Some(2)).await.unwrap();
+        let here = set_plan(db.clone(), GUILD, 1, None, None).await.unwrap();
+        let there = set_plan(db.clone(), OTHER_GUILD, 1, Some(2), None)
+            .await
+            .unwrap();
 
         assert_eq!(here.next_verse, Some((1, 1)));
         assert_eq!(there.next_verse, Some((2, 1)));
@@ -716,8 +855,10 @@ mod tests {
     #[tokio::test]
     async fn reset_clears_progress_and_restarts_the_plan_only_for_that_guild() {
         let (db, path) = test_db("reset");
-        let plan = set_plan(db.clone(), GUILD, 1, Some(2)).await.unwrap();
-        let other = set_plan(db.clone(), OTHER_GUILD, 1, Some(2)).await.unwrap();
+        let plan = set_plan(db.clone(), GUILD, 1, Some(2), None).await.unwrap();
+        let other = set_plan(db.clone(), OTHER_GUILD, 1, Some(2), None)
+            .await
+            .unwrap();
 
         assert_eq!(
             mark_done(
@@ -801,15 +942,15 @@ mod tests {
         }
 
         let connection = open(path.to_str().unwrap()).unwrap();
-        let plan: (Option<u16>, Option<u16>, Option<u16>) = connection
+        let plan: (Option<u16>, Option<u16>, Option<u16>, u16) = connection
             .query_row(
-                "SELECT target_surah, next_surah, next_ayah FROM user_plans
+                "SELECT target_surah, next_surah, next_ayah, daily_target FROM user_plans
                  WHERE guild_id = ?1 AND user_id = '7'",
                 params![LEGACY_GUILD_ID],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        assert_eq!(plan, (None, Some(1), Some(2)));
+        assert_eq!(plan, (None, Some(1), Some(2), 1));
 
         let day: String = connection
             .query_row(
