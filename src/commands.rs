@@ -170,42 +170,21 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     let target = plan.daily_target;
     let reached_target = completed >= target;
 
-    let verse_key = match plan.next_verse {
-        Some((surah, ayah)) => {
-            if reached_target {
-                completed_today
-                    .last()
-                    .cloned()
-                    .unwrap_or_else(|| format!("{surah}:{ayah}"))
-            } else {
-                format!("{surah}:{ayah}")
+    let Some(verse_key) = ayah_to_show(&chapters, plan, &completed_today) else {
+        let message = match plan.target_surah {
+            Some(surah) => format!(
+                "You have finished Surah {}. Use `/plan` to choose another plan.",
+                chapters
+                    .get(&surah)
+                    .map(|chapter| chapter.name.as_str())
+                    .unwrap_or("you selected")
+            ),
+            None => {
+                "You have finished the whole Qur'an. Use `/plan` if you would like to begin again."
+                    .to_owned()
             }
-        }
-        None => {
-            let finished = chapters::final_verse(&chapters, plan.target_surah)
-                .map(|(surah, ayah)| format!("{surah}:{ayah}"))
-                .filter(|key| completed_today.contains(key));
-
-            match finished {
-                Some(key) => key,
-                None => {
-                    let message = match plan.target_surah {
-                        Some(surah) => format!(
-                            "You have finished Surah {}. Use `/plan` to choose another plan.",
-                            chapters
-                                .get(&surah)
-                                .map(|chapter| chapter.name.as_str())
-                                .unwrap_or("you selected")
-                        ),
-                        None => {
-                            "You have finished the whole Qur'an. Use `/plan` if you would like to begin again."
-                                .to_owned()
-                        }
-                    };
-                    return reply_ephemeral(ctx, command, &message).await;
-                }
-            }
-        }
+        };
+        return reply_ephemeral(ctx, command, &message).await;
     };
     let done = completed_today.contains(&verse_key);
     let blocked_today = reached_target && !done;
@@ -384,6 +363,28 @@ fn option_integer(command: &CommandInteraction, name: &str) -> Option<i64> {
         })
 }
 
+fn ayah_to_show(
+    chapters: &chapters::ChapterList,
+    plan: db::Plan,
+    completed_today: &[String],
+) -> Option<String> {
+    match plan.next_verse {
+        Some((surah, ayah)) => {
+            if completed_today.len() as u16 >= plan.daily_target {
+                completed_today
+                    .last()
+                    .cloned()
+                    .or_else(|| Some(format!("{surah}:{ayah}")))
+            } else {
+                Some(format!("{surah}:{ayah}"))
+            }
+        }
+        None => chapters::final_verse(chapters, plan.target_surah)
+            .map(|(surah, ayah)| format!("{surah}:{ayah}"))
+            .filter(|key| completed_today.contains(key)),
+    }
+}
+
 async fn reply_ephemeral(ctx: &Context, command: &CommandInteraction, message: &str) -> Result<()> {
     command
         .create_response(
@@ -397,4 +398,87 @@ async fn reply_ephemeral(ctx: &Context, command: &CommandInteraction, message: &
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> chapters::ChapterList {
+        [
+            (
+                1,
+                chapters::Chapter {
+                    name: "Al-Fatihah".to_owned(),
+                    arabic: "الفاتحة".to_owned(),
+                    verses: 3,
+                },
+            ),
+            (
+                2,
+                chapters::Chapter {
+                    name: "Al-Baqarah".to_owned(),
+                    arabic: "البقرة".to_owned(),
+                    verses: 2,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn plan(
+        target_surah: Option<u16>,
+        next_verse: Option<(u16, u16)>,
+        daily_target: u16,
+    ) -> db::Plan {
+        db::Plan {
+            target_surah,
+            next_verse,
+            daily_target,
+        }
+    }
+
+    fn done(verses: &[&str]) -> Vec<String> {
+        verses.iter().map(|verse| (*verse).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_ayah_to_show_follows_todays_progress() {
+        let chapters = fixture();
+
+        assert_eq!(
+            ayah_to_show(&chapters, plan(None, Some((1, 1)), 1), &[]),
+            Some("1:1".to_owned())
+        );
+        assert_eq!(
+            ayah_to_show(
+                &chapters,
+                plan(None, Some((1, 3)), 3),
+                &done(&["1:1", "1:2"])
+            ),
+            Some("1:3".to_owned())
+        );
+        assert_eq!(
+            ayah_to_show(
+                &chapters,
+                plan(None, Some((2, 1)), 3),
+                &done(&["1:1", "1:2", "1:3"])
+            ),
+            Some("1:3".to_owned())
+        );
+        assert_eq!(
+            ayah_to_show(&chapters, plan(None, None, 1), &done(&["2:2"])),
+            Some("2:2".to_owned())
+        );
+        assert_eq!(ayah_to_show(&chapters, plan(None, None, 1), &[]), None);
+        assert_eq!(
+            ayah_to_show(&chapters, plan(Some(1), None, 1), &done(&["1:3"])),
+            Some("1:3".to_owned())
+        );
+        assert_eq!(
+            ayah_to_show(&chapters, plan(Some(1), None, 1), &done(&["1:2"])),
+            None
+        );
+    }
 }
