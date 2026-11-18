@@ -58,6 +58,7 @@ pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     };
 
     let mode = option_string(command, "mode").unwrap_or_default();
+    let daily = option_integer(command, "daily").map(|value| value.clamp(1, 10) as u16);
     let data = Data::from_context(ctx).await?;
     let chapters = data.chapters.snapshot().await;
     let target_surah = match mode {
@@ -73,7 +74,7 @@ pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
                     .await;
                 }
 
-                let (content, components) = ui::surah_picker(0, &chapters);
+                let (content, components) = ui::surah_picker(0, &chapters, daily);
                 command
                     .create_response(
                         ctx.http.clone(),
@@ -117,7 +118,7 @@ pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
         guild_id,
         command.user.id.get(),
         target_surah,
-        option_integer(command, "daily").map(|value| value.clamp(1, 10) as u16),
+        daily,
     )
     .await?;
     let name = match target_surah {

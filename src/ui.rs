@@ -182,7 +182,11 @@ fn plural(count: u32, word: &str) -> String {
     }
 }
 
-pub fn surah_picker(page: usize, chapters: &ChapterList) -> (String, Vec<CreateActionRow>) {
+pub fn surah_picker(
+    page: usize,
+    chapters: &ChapterList,
+    daily: Option<u16>,
+) -> (String, Vec<CreateActionRow>) {
     let pages = surah_page_count(chapters).max(1);
     let page = page.min(pages - 1);
     let (start, end) = surah_page_bounds(page, chapters.len());
@@ -198,22 +202,26 @@ pub fn surah_picker(page: usize, chapters: &ChapterList) -> (String, Vec<CreateA
         .collect();
 
     let menu = CreateSelectMenu::new(
-        "wird|surah_select",
+        surah_select_id(daily),
         CreateSelectMenuKind::String { options },
     )
     .placeholder("Choose a surah");
 
-    let previous = CreateButton::new(format!("wird|surah_page|{}", page.saturating_sub(1)))
+    let previous = CreateButton::new(surah_page_id(page.saturating_sub(1), daily))
         .label("Previous")
         .style(ButtonStyle::Secondary)
         .disabled(page == 0);
-    let next = CreateButton::new(format!("wird|surah_page|{}", page + 1))
+    let next = CreateButton::new(surah_page_id(page + 1, daily))
         .label("Next")
         .style(ButtonStyle::Secondary)
         .disabled(page + 1 >= pages);
 
+    let pace = match daily {
+        Some(daily) => format!(" Your plan will use {daily} ayah(s) per day."),
+        None => String::new(),
+    };
     let content = format!(
-        "Choose the surah you want to memorize. Page {}/{} · {} surahs",
+        "Choose the surah you want to memorize. Page {}/{} · {} surahs.{pace}",
         page + 1,
         pages,
         chapters.len()
@@ -226,6 +234,20 @@ pub fn surah_picker(page: usize, chapters: &ChapterList) -> (String, Vec<CreateA
             CreateActionRow::Buttons(vec![previous, next]),
         ],
     )
+}
+
+fn surah_select_id(daily: Option<u16>) -> String {
+    match daily {
+        Some(daily) => format!("wird|surah_select|{daily}"),
+        None => "wird|surah_select".to_owned(),
+    }
+}
+
+fn surah_page_id(page: usize, daily: Option<u16>) -> String {
+    match daily {
+        Some(daily) => format!("wird|surah_page|{page}|{daily}"),
+        None => format!("wird|surah_page|{page}"),
+    }
 }
 
 fn surah_page_count(chapters: &ChapterList) -> usize {
@@ -468,6 +490,14 @@ mod tests {
         assert_eq!(surah_page_bounds(0, chapters.len()), (0, 25));
         assert_eq!(surah_page_bounds(4, chapters.len()), (100, 114));
         assert_eq!(surah_page_count(&ChapterList::new()), 0);
+    }
+
+    #[test]
+    fn the_surah_picker_keeps_the_chosen_daily_size() {
+        assert_eq!(surah_select_id(None), "wird|surah_select");
+        assert_eq!(surah_select_id(Some(4)), "wird|surah_select|4");
+        assert_eq!(surah_page_id(2, None), "wird|surah_page|2");
+        assert_eq!(surah_page_id(2, Some(4)), "wird|surah_page|2|4");
     }
 
     #[test]

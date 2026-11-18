@@ -55,9 +55,13 @@ pub async fn handle(ctx: &Context, component: &ComponentInteraction) -> Result<(
         }
         "surah_page" => {
             let page = parts.next().unwrap_or_default();
-            surah_page(ctx, component, page).await
+            let daily = parse_daily(parts.next());
+            surah_page(ctx, component, page, daily).await
         }
-        "surah_select" => surah_select(ctx, component).await,
+        "surah_select" => {
+            let daily = parse_daily(parts.next());
+            surah_select(ctx, component, daily).await
+        }
         "help" => help(ctx, component).await,
         _ => Ok(()),
     }
@@ -205,7 +209,17 @@ async fn memorized(
     Ok(())
 }
 
-async fn surah_page(ctx: &Context, component: &ComponentInteraction, page: &str) -> Result<()> {
+fn parse_daily(raw: Option<&str>) -> Option<u16> {
+    raw.and_then(|value| value.parse::<u16>().ok())
+        .map(|value| value.clamp(1, 10))
+}
+
+async fn surah_page(
+    ctx: &Context,
+    component: &ComponentInteraction,
+    page: &str,
+    daily: Option<u16>,
+) -> Result<()> {
     let data = Data::from_context(ctx).await?;
     let chapters = data.chapters.snapshot().await;
 
@@ -215,7 +229,7 @@ async fn surah_page(ctx: &Context, component: &ComponentInteraction, page: &str)
             Vec::new(),
         )
     } else {
-        ui::surah_picker(page.parse().unwrap_or(0), &chapters)
+        ui::surah_picker(page.parse().unwrap_or(0), &chapters, daily)
     };
 
     component
@@ -232,7 +246,11 @@ async fn surah_page(ctx: &Context, component: &ComponentInteraction, page: &str)
     Ok(())
 }
 
-async fn surah_select(ctx: &Context, component: &ComponentInteraction) -> Result<()> {
+async fn surah_select(
+    ctx: &Context,
+    component: &ComponentInteraction,
+    daily: Option<u16>,
+) -> Result<()> {
     let Some(guild_id) = component.guild_id else {
         return reply_ephemeral(ctx, component, "Use this in a server.").await;
     };
@@ -260,7 +278,7 @@ async fn surah_select(ctx: &Context, component: &ComponentInteraction) -> Result
         guild_id.get(),
         component.user.id.get(),
         Some(surah),
-        None,
+        daily,
     )
     .await?;
 
@@ -398,4 +416,18 @@ async fn reply_ephemeral(
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_daily;
+
+    #[test]
+    fn a_picked_surah_keeps_a_valid_daily_size() {
+        assert_eq!(parse_daily(Some("4")), Some(4));
+        assert_eq!(parse_daily(Some("0")), Some(1));
+        assert_eq!(parse_daily(Some("99")), Some(10));
+        assert_eq!(parse_daily(Some("x")), None);
+        assert_eq!(parse_daily(None), None);
+    }
 }
