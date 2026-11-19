@@ -183,6 +183,13 @@ async fn memorized(
                     ),
                 )
                 .await?;
+            component
+                .channel_id
+                .say(
+                    &ctx.http,
+                    ui::wird_completed_announcement(user_id, completed, plan.daily_target),
+                )
+                .await?;
         } else if let Some((next_surah, next_ayah)) = next {
             let next_key = format!("{next_surah}:{next_ayah}");
             match data.api.ayah(&next_key).await {
@@ -246,10 +253,6 @@ async fn memorized(
                 .await?;
         }
 
-        component
-            .channel_id
-            .say(&ctx.http, ui::memorization_announcement(user_id, verse_key))
-            .await?;
         return Ok(());
     }
 

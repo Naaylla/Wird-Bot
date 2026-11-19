@@ -117,18 +117,17 @@ pub fn intro_embed() -> CreateEmbed {
 
 pub fn leaderboard_embed(entries: &[LeaderEntry], today: NaiveDate) -> CreateEmbed {
     let description = if entries.is_empty() {
-        "No one has memorized an ayah yet. Be the first — run `/wird`.".to_owned()
+        "No streaks yet. Be the first — run `/wird`.".to_owned()
     } else {
         entries
             .iter()
             .enumerate()
             .map(|(index, entry)| {
                 format!(
-                    "**#{}** <@{}> — {} · {}",
+                    "**#{}** <@{}> — {}",
                     index + 1,
                     entry.user_id,
                     plural(entry.streak, "day"),
-                    plural(entry.total, "ayah"),
                 )
             })
             .collect::<Vec<_>>()
@@ -302,9 +301,9 @@ pub fn reset_confirm_buttons() -> CreateActionRow {
     ])
 }
 
-pub fn memorization_announcement(user_id: u64, verse_key: &str) -> String {
+pub fn wird_completed_announcement(user_id: u64, completed: u16, daily_target: u16) -> String {
     format!(
-        "MashaAllah! <@{user_id}> just memorized **{verse_key}** today. What about you? Go for it, one ayah at a time, in shaa Allah!"
+        "MashaAllah! <@{user_id}> completed today's wird ({completed}/{daily_target}). May Allah accept it."
     )
 }
 
@@ -456,11 +455,11 @@ mod tests {
     }
 
     #[test]
-    fn memorization_announcement_mentions_only_the_completer() {
-        let message = memorization_announcement(123, "2:255");
+    fn wird_completed_announcement_mentions_only_the_completer() {
+        let message = wird_completed_announcement(123, 4, 4);
 
         assert!(message.contains("<@123>"));
-        assert!(message.contains("**2:255**"));
+        assert!(message.contains("(4/4)"));
         assert_eq!(message.matches("<@").count(), 1);
     }
 

@@ -62,7 +62,6 @@ pub struct Stats {
 
 pub struct LeaderEntry {
     pub user_id: u64,
-    pub total: u32,
     pub streak: u32,
 }
 
@@ -452,49 +451,34 @@ pub async fn leaderboard(
 ) -> Result<Vec<LeaderEntry>> {
     tokio::task::spawn_blocking(move || {
         let connection = lock(&db);
-        let mut statement = connection
-            .prepare("SELECT user_id, day, verse_key FROM memorizations WHERE guild_id = ?1")?;
+        let mut statement =
+            connection.prepare("SELECT user_id, day FROM memorizations WHERE guild_id = ?1")?;
         let rows = statement.query_map(params![guild_id.to_string()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
 
-        let mut by_user: HashMap<u64, (Vec<NaiveDate>, HashSet<String>)> = HashMap::new();
+        let mut by_user: HashMap<u64, Vec<NaiveDate>> = HashMap::new();
         for row in rows {
-            let (user_id, day, verse) = row?;
+            let (user_id, day) = row?;
             let (Ok(user_id), Ok(day)) = (
                 user_id.parse::<u64>(),
                 NaiveDate::parse_from_str(&day, "%Y-%m-%d"),
             ) else {
                 continue;
             };
-            let entry = by_user.entry(user_id).or_default();
-            entry.0.push(day);
-            entry.1.insert(verse);
+            by_user.entry(user_id).or_default().push(day);
         }
 
         let mut entries: Vec<LeaderEntry> = by_user
             .into_iter()
-            .map(|(user_id, (days, verses))| {
+            .map(|(user_id, days)| {
                 let known: HashSet<NaiveDate> = days.into_iter().collect();
                 let (streak, _) = active_streak(&known, today);
-                LeaderEntry {
-                    user_id,
-                    total: verses.len() as u32,
-                    streak,
-                }
+                LeaderEntry { user_id, streak }
             })
             .collect();
 
-        entries.sort_by(|a, b| {
-            b.streak
-                .cmp(&a.streak)
-                .then(b.total.cmp(&a.total))
-                .then(a.user_id.cmp(&b.user_id))
-        });
+        entries.sort_by(|a, b| b.streak.cmp(&a.streak).then(a.user_id.cmp(&b.user_id)));
         entries.truncate(limit);
 
         Ok(entries)
@@ -973,7 +957,6 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].user_id, 1);
         assert_eq!(entries[0].streak, 3);
-        assert_eq!(entries[0].total, 3);
         assert_eq!(entries[1].user_id, 2);
         assert_eq!(entries[1].streak, 1);
         assert_eq!(entries[2].user_id, 3);
