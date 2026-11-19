@@ -85,8 +85,7 @@ fn command_definitions() -> Vec<CreateCommand> {
                 .add_string_choice("Full Qur'an", "quran")
                 .add_string_choice("One surah", "surah"),
             ),
-        CreateCommand::new("wird")
-            .description("Show today's ayahs together and mark each one memorized"),
+        CreateCommand::new("wird").description("Show your next ayah and mark it memorized"),
         CreateCommand::new("progress").description("Show your memorized count and daily streak"),
         CreateCommand::new("leaderboard")
             .description("Show the server's daily memorization streak leaderboard"),

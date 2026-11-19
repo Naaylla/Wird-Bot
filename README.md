@@ -9,7 +9,7 @@ A Discord bot for memorising the Qur'an at your own pace, with a daily goal of 1
 ## Features
 
 - Choose the full Qur'an or any surah, with a daily goal of 1–10 ayahs.
-- Browse all 114 surahs and view each day's ayahs together.
+- Browse all 114 surahs and memorize ayahs one at a time.
 - Read Arabic text, English translations, and tafsir.
 - Track progress and streaks, view the server leaderboard, and set daily reminders.
 
@@ -36,7 +36,7 @@ A Discord bot for memorising the Qur'an at your own pace, with a daily goal of 1
 | Command | Description |
 | --- | --- |
 | `/plan` | Choose a whole-Qur'an or single-surah plan, then your daily size (1-10 ayahs) |
-| `/wird` | Show today's ayahs together, mark them individually, and open tafsir |
+| `/wird` | Show your next ayah and mark it memorized |
 | `/progress` | View your memorization total and streak |
 | `/leaderboard` | View the server leaderboard |
 | `/remind` | Get a daily DM when your wird is unfinished; `/remind disable:true` turns it off |

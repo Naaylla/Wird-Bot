@@ -6,9 +6,9 @@ use serenity::all::{
 };
 use tracing::warn;
 
-use crate::chapters;
 use crate::data::Data;
 use crate::db;
+use crate::quran;
 use crate::ui;
 
 pub async fn plan(ctx: &Context, command: &CommandInteraction) -> Result<()> {
@@ -93,8 +93,7 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
     let completed = completed_today.len() as u16;
     let target = plan.daily_target;
 
-    let verse_keys = ayahs_to_show(&chapters, plan, &completed_today);
-    if verse_keys.is_empty() {
+    let Some(verse_key) = ayah_to_show(plan, &completed_today) else {
         let message = match plan.target_surah {
             Some(surah) => format!(
                 "You have finished Surah {}. Use `/plan` to choose another plan.",
@@ -109,7 +108,7 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
             }
         };
         return reply_ephemeral(ctx, command, &message).await;
-    }
+    };
 
     command
         .create_response(
@@ -120,37 +119,42 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
         )
         .await?;
 
-    let mut ayahs = Vec::with_capacity(verse_keys.len());
-    for verse_key in &verse_keys {
-        match data.api.ayah(verse_key).await {
-            Ok(ayah) => ayahs.push(ayah),
-            Err(err) => {
-                warn!("could not fetch {verse_key}: {err:#}");
-                command
-                    .edit_response(
-                        ctx.http.clone(),
-                        EditInteractionResponse::new().content(
-                            "The Qur'an API did not answer. Please try again in a moment.",
-                        ),
-                    )
-                    .await?;
-                return Ok(());
-            }
+    let ayah = match data.api.ayah(&verse_key).await {
+        Ok(ayah) => ayah,
+        Err(err) => {
+            warn!("could not fetch {verse_key}: {err:#}");
+            command
+                .edit_response(
+                    ctx.http.clone(),
+                    EditInteractionResponse::new()
+                        .content("The Qur'an API did not answer. Please try again in a moment."),
+                )
+                .await?;
+            return Ok(());
         }
-    }
+    };
+    let done = completed_today.contains(&verse_key);
+    let blocked_today = completed >= target && !done;
+    let (surah, _) = quran::verse_parts(&ayah.verse_key);
 
     command
         .edit_response(
             ctx.http.clone(),
             EditInteractionResponse::new()
-                .embeds(ui::daily_embeds(
-                    &ayahs,
-                    &chapters,
+                .embed(ui::daily_embed(
+                    &ayah,
+                    chapters.get(&surah),
                     completed,
                     target,
+                    done,
                     plan.next_verse.is_none(),
                 ))
-                .components(ui::daily_buttons(day, &ayahs, &completed_today)),
+                .components(vec![ui::daily_buttons(
+                    day,
+                    &ayah.verse_key,
+                    done,
+                    blocked_today,
+                )]),
         )
         .await?;
 
@@ -342,28 +346,13 @@ fn option_bool(command: &CommandInteraction, name: &str) -> Option<bool> {
         })
 }
 
-fn ayahs_to_show(
-    chapters: &chapters::ChapterList,
-    plan: db::Plan,
-    completed_today: &[String],
-) -> Vec<String> {
+fn ayah_to_show(plan: db::Plan, completed_today: &[String]) -> Option<String> {
     if completed_today.len() as u16 >= plan.daily_target || plan.next_verse.is_none() {
-        return completed_today.to_vec();
+        return completed_today.last().cloned();
     }
 
-    let mut current = plan.next_verse;
-    let count = plan
-        .daily_target
-        .saturating_sub(completed_today.len() as u16);
-    let mut verses = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        let Some((surah, ayah)) = current else {
-            break;
-        };
-        verses.push(format!("{surah}:{ayah}"));
-        current = chapters::next_verse(chapters, (surah, ayah), plan.target_surah);
-    }
-    verses
+    plan.next_verse
+        .map(|(surah, ayah)| format!("{surah}:{ayah}"))
 }
 
 fn parse_time(raw: &str) -> Option<String> {
@@ -419,29 +408,6 @@ async fn reply_ephemeral(ctx: &Context, command: &CommandInteraction, message: &
 mod tests {
     use super::*;
 
-    fn fixture() -> chapters::ChapterList {
-        [
-            (
-                1,
-                chapters::Chapter {
-                    name: "Al-Fatihah".to_owned(),
-                    arabic: "الفاتحة".to_owned(),
-                    verses: 3,
-                },
-            ),
-            (
-                2,
-                chapters::Chapter {
-                    name: "Al-Baqarah".to_owned(),
-                    arabic: "البقرة".to_owned(),
-                    verses: 2,
-                },
-            ),
-        ]
-        .into_iter()
-        .collect()
-    }
-
     fn plan(
         target_surah: Option<u16>,
         next_verse: Option<(u16, u16)>,
@@ -478,52 +444,23 @@ mod tests {
     }
 
     #[test]
-    fn todays_wird_contains_the_daily_target_and_respects_plan_boundaries() {
-        let chapters = fixture();
-
+    fn todays_wird_shows_one_ayah_and_advances_after_memorization() {
         assert_eq!(
-            ayahs_to_show(&chapters, plan(None, Some((1, 1)), 1), &[]),
-            vec!["1:1".to_owned()]
+            ayah_to_show(plan(None, Some((1, 1)), 3), &[]),
+            Some("1:1".to_owned())
         );
         assert_eq!(
-            ayahs_to_show(
-                &chapters,
-                plan(None, Some((1, 3)), 3),
-                &done(&["1:1", "1:2"])
-            ),
-            vec!["1:3".to_owned()]
+            ayah_to_show(plan(None, Some((1, 2)), 3), &done(&["1:1"])),
+            Some("1:2".to_owned())
         );
         assert_eq!(
-            ayahs_to_show(
-                &chapters,
-                plan(None, Some((2, 1)), 3),
-                &done(&["1:1", "1:2", "1:3"])
-            ),
-            vec!["1:1".to_owned(), "1:2".to_owned(), "1:3".to_owned()]
+            ayah_to_show(plan(None, Some((2, 1)), 3), &done(&["1:1", "1:2", "1:3"])),
+            Some("1:3".to_owned())
         );
+        assert_eq!(ayah_to_show(plan(None, None, 1), &[]), None);
         assert_eq!(
-            ayahs_to_show(&chapters, plan(None, Some((1, 1)), 3), &[]),
-            vec!["1:1".to_owned(), "1:2".to_owned(), "1:3".to_owned()]
-        );
-        assert_eq!(
-            ayahs_to_show(&chapters, plan(None, Some((1, 2)), 3), &[]),
-            vec!["1:2".to_owned(), "1:3".to_owned(), "2:1".to_owned()]
-        );
-        assert_eq!(
-            ayahs_to_show(&chapters, plan(Some(1), Some((1, 2)), 3), &[]),
-            vec!["1:2".to_owned(), "1:3".to_owned()]
-        );
-        assert_eq!(
-            ayahs_to_show(&chapters, plan(None, None, 1), &[]),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            ayahs_to_show(&chapters, plan(Some(1), None, 1), &done(&["1:3"])),
-            vec!["1:3".to_owned()]
-        );
-        assert_eq!(
-            ayahs_to_show(&chapters, plan(Some(1), None, 1), &done(&["1:2"])),
-            vec!["1:2".to_owned()]
+            ayah_to_show(plan(Some(1), None, 3), &done(&["1:3"])),
+            Some("1:3".to_owned())
         );
     }
 }

@@ -12,66 +12,45 @@ const GREEN: u32 = 0x2E_CC_71;
 const SURAHS_PER_PAGE: usize = 25;
 const BASMALA: &str = "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ";
 
-pub fn daily_embeds(
-    ayahs: &[Ayah],
-    chapters: &ChapterList,
+pub fn daily_embed(
+    ayah: &Ayah,
+    chapter: Option<&Chapter>,
     completed: u16,
     target: u16,
+    done: bool,
     plan_complete: bool,
-) -> Vec<CreateEmbed> {
-    let remaining = target.saturating_sub(completed);
+) -> CreateEmbed {
+    let (surah, ayah_number) = quran::verse_parts(&ayah.verse_key);
+    let title = chapter
+        .map(|chapter| format!("{} · {} · {}", chapter.name, chapter.arabic, ayah.verse_key))
+        .unwrap_or_else(|| format!("Surah {surah} · {}", ayah.verse_key));
+    let body = format!(
+        "{}\n\n**Translation**\n{}",
+        daily_arabic(ayah),
+        clean_text(&ayah.translation)
+    );
     let footer = if plan_complete {
-        format!("This plan is complete · {completed}/{target} ayahs memorized today.")
-    } else if remaining == 0 {
-        format!("Today's wird is complete: {completed}/{target} ayahs.")
+        format!("Plan complete · {completed}/{target} memorized today.")
+    } else if completed >= target {
+        format!("Today's wird is complete: {completed}/{target} memorized.")
+    } else if done {
+        format!(
+            "{completed}/{target} memorized today · {} to go.",
+            target - completed
+        )
     } else {
-        format!("{completed}/{target} memorized today · {remaining} to go.")
+        format!(
+            "Ayah {} of {target} · tap **Memorized** when you're ready.",
+            completed + 1
+        )
     };
 
-    let mut descriptions = Vec::new();
-    let mut description = String::new();
-    for ayah in ayahs {
-        let body = format!(
-            "**{}**\n{}\n\n**Translation**\n{}\n\n",
-            ayah.verse_key,
-            daily_arabic(ayah),
-            clean_text(&ayah.translation)
-        );
-        if !description.is_empty() && description.chars().count() + body.chars().count() > 3_900 {
-            descriptions.push(std::mem::take(&mut description));
-        }
-        description.push_str(&truncate(&body, 3_900));
-    }
-    if !description.is_empty() {
-        descriptions.push(description);
-    }
-
-    let (first_surah, first_ayah) = ayahs
-        .first()
-        .map(|ayah| quran::verse_parts(&ayah.verse_key))
-        .unwrap_or((1, 1));
-    descriptions
-        .into_iter()
-        .enumerate()
-        .map(|(index, description)| {
-            let title = if ayahs.len() == 1 {
-                chapters
-                    .get(&first_surah)
-                    .map(|chapter| format!("{} · {}", chapter.name, ayahs[0].verse_key))
-                    .unwrap_or_else(|| format!("Surah {first_surah} · {}", ayahs[0].verse_key))
-            } else if index == 0 {
-                format!("Today's Wird · {} ayahs", ayahs.len())
-            } else {
-                format!("Today's Wird · continued ({}/{})", index + 1, ayahs.len())
-            };
-            CreateEmbed::new()
-                .title(title)
-                .url(format!("https://quran.com/{first_surah}/{first_ayah}"))
-                .description(description)
-                .colour(GREEN)
-                .footer(CreateEmbedFooter::new(footer.clone()))
-        })
-        .collect()
+    CreateEmbed::new()
+        .title(title)
+        .url(format!("https://quran.com/{surah}/{ayah_number}"))
+        .description(truncate(&body, 4_000))
+        .colour(GREEN)
+        .footer(CreateEmbedFooter::new(footer))
 }
 
 pub fn tafsir_embed(
@@ -116,30 +95,15 @@ pub fn progress_embed(total: u32, streak: u32, done_today: bool) -> CreateEmbed 
             "**Ayahs memorized:** {total}\n**Current streak:** {streak} day(s)\n**{today}**"
         ))
         .colour(GREEN)
-        .footer(CreateEmbedFooter::new(
-            "Your daily goal, one ayah at a time",
-        ))
 }
 
 pub fn help_embed() -> CreateEmbed {
     CreateEmbed::new()
-        .title("Wird — how it works")
+        .title("How to start")
         .description(
-            "**Your daily goal, one ayah at a time.**\n\n\
-             1. Choose a plan with `/plan` — select the full Qur'an or one surah, then choose 1–10 ayahs per day.\n\
-             2. Run `/wird` to see all of today's ayahs together.\n\
-             3. Tap **Memorized** for each ayah once you have learned it.\n\n\
-             **Commands**\n\
-             `/plan` — choose a plan and daily size in separate steps\n\
-             `/wird` — show today's ayahs together and mark each one memorized\n\
-             `/progress` — see your total and daily streak\n\
-             `/leaderboard` — the server's streak leaderboard\n\
-             `/remind` — get a daily DM when your wird is unfinished\n\
-             `/reset` — reset your progress in this server\n\
-             `/help` — this message",
+            "Choose what to memorize with `/plan`, then use `/wird` to see your next ayah. Tap **Memorized** to move on. Use `/help` anytime you need a reminder.",
         )
         .colour(GREEN)
-        .footer(CreateEmbedFooter::new("Your daily goal, one ayah at a time"))
 }
 
 pub fn intro_embed() -> CreateEmbed {
@@ -280,40 +244,29 @@ fn surah_page_bounds(page: usize, total: usize) -> (usize, usize) {
 
 pub fn daily_buttons(
     day: NaiveDate,
-    ayahs: &[Ayah],
-    completed_today: &[String],
-) -> Vec<CreateActionRow> {
+    verse_key: &str,
+    done: bool,
+    blocked_today: bool,
+) -> CreateActionRow {
     let day = day.format("%Y-%m-%d");
-    let buttons = ayahs
-        .iter()
-        .map(|ayah| {
-            let done = completed_today.contains(&ayah.verse_key);
-            CreateButton::new(format!("wird|memorized|{day}|{}", ayah.verse_key))
-                .label(if done {
-                    format!("{} ✓", ayah.verse_key)
-                } else {
-                    format!("I memorized {}", ayah.verse_key)
-                })
-                .style(ButtonStyle::Success)
-                .disabled(done)
+    let memorized = CreateButton::new(format!("wird|memorized|{day}|{verse_key}"))
+        .label(if done {
+            "Memorized ✓"
+        } else if blocked_today {
+            "Daily goal reached"
+        } else {
+            "Memorized"
         })
-        .collect::<Vec<_>>();
-    let button_rows = buttons
-        .chunks(5)
-        .map(|buttons| CreateActionRow::Buttons(buttons.to_vec()))
-        .collect::<Vec<_>>();
-    let options = ayahs
-        .iter()
-        .map(|ayah| CreateSelectMenuOption::new(ayah.verse_key.clone(), ayah.verse_key.clone()))
-        .collect();
-    let tafsir_menu = CreateSelectMenu::new(
-        "wird|tafsir_select",
-        CreateSelectMenuKind::String { options },
-    )
-    .placeholder("Choose an ayah for tafsir");
-    let mut rows = button_rows;
-    rows.push(CreateActionRow::SelectMenu(tafsir_menu));
-    rows
+        .style(ButtonStyle::Success)
+        .disabled(done || blocked_today);
+    let tafsir_en = CreateButton::new(format!("wird|tafsir_en|{verse_key}"))
+        .label("Tafsir (EN)")
+        .style(ButtonStyle::Secondary);
+    let tafsir_ar = CreateButton::new(format!("wird|tafsir_ar|{verse_key}"))
+        .label("Tafsir (AR)")
+        .style(ButtonStyle::Secondary);
+
+    CreateActionRow::Buttons(vec![memorized, tafsir_en, tafsir_ar])
 }
 
 pub fn tafsir_buttons(verse_key: &str) -> CreateActionRow {

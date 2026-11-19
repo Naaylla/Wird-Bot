@@ -155,21 +155,105 @@ async fn memorized(
     )
     .await?;
 
-    let message = match result {
-        db::MarkResult::Inserted => {
-            let stats =
-                db::stats(data.db.clone(), guild_id, user_id, Utc::now().date_naive()).await?;
-            let completed = completed_today.len() as u16 + 1;
-            let follow_up = if completed < plan.daily_target {
-                "Tap the next ayah's button in today's block."
+    if result == db::MarkResult::Inserted {
+        let completed = completed_today.len() as u16 + 1;
+        if completed >= plan.daily_target {
+            let message = if next.is_none() {
+                match plan.target_surah {
+                    Some(surah) => format!(
+                        "MashaAllah! Today's goal is complete, and you finished Surah {}. Use `/plan` to choose another.",
+                        chapters.get(&surah).map(|chapter| chapter.name.as_str()).unwrap_or("you selected")
+                    ),
+                    None => "MashaAllah! Today's goal is complete, and you finished the whole Qur'an. Use `/plan` if you want to begin again.".to_owned(),
+                }
             } else {
-                "Your next ayah will be available tomorrow."
+                format!(
+                    "MashaAllah! Today's goal is complete ({completed}/{}). Come back tomorrow, in shaa Allah.",
+                    plan.daily_target
+                )
             };
-            format!(
-                "MashaAllah! You memorized {verse_key} today. {completed}/{} ayahs done. Current streak: {} day(s). {follow_up}",
-                plan.daily_target, stats.streak
-            )
+            component
+                .create_response(
+                    ctx.http.clone(),
+                    CreateInteractionResponse::UpdateMessage(
+                        CreateInteractionResponseMessage::new()
+                            .content(message)
+                            .embeds(Vec::new())
+                            .components(Vec::new()),
+                    ),
+                )
+                .await?;
+        } else if let Some((next_surah, next_ayah)) = next {
+            let next_key = format!("{next_surah}:{next_ayah}");
+            match data.api.ayah(&next_key).await {
+                Ok(ayah) => {
+                    component
+                        .create_response(
+                            ctx.http.clone(),
+                            CreateInteractionResponse::UpdateMessage(
+                                CreateInteractionResponseMessage::new()
+                                    .embed(ui::daily_embed(
+                                        &ayah,
+                                        chapters.get(&next_surah),
+                                        completed,
+                                        plan.daily_target,
+                                        false,
+                                        false,
+                                    ))
+                                    .components(vec![ui::daily_buttons(
+                                        Utc::now().date_naive(),
+                                        &ayah.verse_key,
+                                        false,
+                                        false,
+                                    )]),
+                            ),
+                        )
+                        .await?;
+                }
+                Err(err) => {
+                    warn!("could not fetch {next_key} after memorizing {verse_key}: {err:#}");
+                    component
+                        .create_response(
+                            ctx.http.clone(),
+                            CreateInteractionResponse::UpdateMessage(
+                                CreateInteractionResponseMessage::new()
+                                    .content("MashaAllah, that ayah is memorized. I couldn't load the next one right now; run `/wird` to continue.")
+                                    .embeds(Vec::new())
+                                    .components(Vec::new()),
+                            ),
+                        )
+                        .await?;
+                }
+            }
+        } else {
+            let message = match plan.target_surah {
+                Some(surah) => format!(
+                    "MashaAllah! You finished Surah {}. Use `/plan` to choose another.",
+                    chapters.get(&surah).map(|chapter| chapter.name.as_str()).unwrap_or("you selected")
+                ),
+                None => "MashaAllah! You finished the whole Qur'an. Use `/plan` if you want to begin again.".to_owned(),
+            };
+            component
+                .create_response(
+                    ctx.http.clone(),
+                    CreateInteractionResponse::UpdateMessage(
+                        CreateInteractionResponseMessage::new()
+                            .content(message)
+                            .embeds(Vec::new())
+                            .components(Vec::new()),
+                    ),
+                )
+                .await?;
         }
+
+        component
+            .channel_id
+            .say(&ctx.http, ui::memorization_announcement(user_id, verse_key))
+            .await?;
+        return Ok(());
+    }
+
+    let message = match result {
         db::MarkResult::AlreadyDone => {
             "You already memorized this ayah today. Run `/wird` to continue.".to_owned()
         }
@@ -180,18 +264,10 @@ async fn memorized(
         db::MarkResult::Stale => {
             "Your plan has changed. Run `/wird` to get your current ayah.".to_owned()
         }
+        db::MarkResult::Inserted => "That ayah is memorized. Run `/wird` to continue.".to_owned(),
     };
 
-    reply_ephemeral(ctx, component, &message).await?;
-
-    if result == db::MarkResult::Inserted {
-        component
-            .channel_id
-            .say(&ctx.http, ui::memorization_announcement(user_id, verse_key))
-            .await?;
-    }
-
-    Ok(())
+    reply_ephemeral(ctx, component, &message).await
 }
 
 async fn surah_page(ctx: &Context, component: &ComponentInteraction, page: &str) -> Result<()> {
