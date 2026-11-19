@@ -44,11 +44,6 @@ impl EventHandler for Handler {
                     notify_command_failure(&ctx, &command).await;
                 }
             }
-            Interaction::Autocomplete(command) => {
-                if let Err(err) = commands::autocomplete(&ctx, &command).await {
-                    error!("command autocomplete failed: {err:#}");
-                }
-            }
             Interaction::Component(component) => {
                 if let Err(err) = components::handle(&ctx, &component).await {
                     error!("button failed: {err:#}");
@@ -89,25 +84,9 @@ fn command_definitions() -> Vec<CreateCommand> {
                 .required(true)
                 .add_string_choice("Full Qur'an", "quran")
                 .add_string_choice("One surah", "surah"),
-            )
-            .add_option(
-                CreateCommandOption::new(
-                    CommandOptionType::String,
-                    "surah",
-                    "Search for a surah to memorize",
-                )
-                .set_autocomplete(true),
-            )
-            .add_option(
-                CreateCommandOption::new(
-                    CommandOptionType::Integer,
-                    "daily",
-                    "How many ayahs to memorize each day (1-10)",
-                )
-                .min_int_value(1)
-                .max_int_value(10),
             ),
-        CreateCommand::new("wird").description("Show your current ayah and memorization buttons"),
+        CreateCommand::new("wird")
+            .description("Show today's ayahs together and mark each one memorized"),
         CreateCommand::new("progress").description("Show your memorized count and daily streak"),
         CreateCommand::new("leaderboard")
             .description("Show the server's daily memorization streak leaderboard"),

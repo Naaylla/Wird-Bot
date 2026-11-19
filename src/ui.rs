@@ -12,49 +12,66 @@ const GREEN: u32 = 0x2E_CC_71;
 const SURAHS_PER_PAGE: usize = 25;
 const BASMALA: &str = "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ";
 
-pub fn daily_embed(
-    ayah: &Ayah,
-    chapter: Option<&Chapter>,
-    done: bool,
-    blocked_today: bool,
+pub fn daily_embeds(
+    ayahs: &[Ayah],
+    chapters: &ChapterList,
     completed: u16,
     target: u16,
-) -> CreateEmbed {
-    let (surah, ayah_number) = quran::verse_parts(&ayah.verse_key);
-    let title = match chapter {
-        Some(chapter) => format!(
-            "{} · {} · {surah}:{ayah_number}",
-            chapter.name, chapter.arabic
-        ),
-        None => format!("Surah {surah} · {surah}:{ayah_number}"),
-    };
-    let body = format!(
-        "{}\n\n**Translation**\n{}",
-        daily_arabic(ayah),
-        clean_text(&ayah.translation)
-    );
-    let footer = if done && completed >= target {
-        format!(
-            "Today's wird complete: {completed}/{target} ayahs. Return tomorrow, in shaa Allah."
-        )
-    } else if done {
-        format!("{completed}/{target} ayahs memorized today. Run /wird again to continue.")
-    } else if blocked_today {
-        format!("You reached today's target ({completed}/{target}). Come back tomorrow.")
+    plan_complete: bool,
+) -> Vec<CreateEmbed> {
+    let remaining = target.saturating_sub(completed);
+    let footer = if plan_complete {
+        format!("This plan is complete · {completed}/{target} ayahs memorized today.")
+    } else if remaining == 0 {
+        format!("Today's wird is complete: {completed}/{target} ayahs.")
     } else {
-        format!(
-            "Ayah {} of {} for today. Tap \"Memorized\" when you have learned it.",
-            completed + 1,
-            target
-        )
+        format!("{completed}/{target} ayahs memorized today · {remaining} ayah(s) left.")
     };
 
-    CreateEmbed::new()
-        .title(title)
-        .url(format!("https://quran.com/{surah}/{ayah_number}"))
-        .description(truncate(&body, 4_000))
-        .colour(GREEN)
-        .footer(CreateEmbedFooter::new(footer))
+    let mut descriptions = Vec::new();
+    let mut description = String::new();
+    for ayah in ayahs {
+        let body = format!(
+            "**{}**\n{}\n\n**Translation**\n{}\n\n",
+            ayah.verse_key,
+            daily_arabic(ayah),
+            clean_text(&ayah.translation)
+        );
+        if !description.is_empty() && description.chars().count() + body.chars().count() > 3_900 {
+            descriptions.push(std::mem::take(&mut description));
+        }
+        description.push_str(&truncate(&body, 3_900));
+    }
+    if !description.is_empty() {
+        descriptions.push(description);
+    }
+
+    let (first_surah, first_ayah) = ayahs
+        .first()
+        .map(|ayah| quran::verse_parts(&ayah.verse_key))
+        .unwrap_or((1, 1));
+    descriptions
+        .into_iter()
+        .enumerate()
+        .map(|(index, description)| {
+            let title = if ayahs.len() == 1 {
+                chapters
+                    .get(&first_surah)
+                    .map(|chapter| format!("{} · {}", chapter.name, ayahs[0].verse_key))
+                    .unwrap_or_else(|| format!("Surah {first_surah} · {}", ayahs[0].verse_key))
+            } else if index == 0 {
+                format!("Today's Wird · {} ayahs", ayahs.len())
+            } else {
+                format!("Today's Wird · continued ({}/{})", index + 1, ayahs.len())
+            };
+            CreateEmbed::new()
+                .title(title)
+                .url(format!("https://quran.com/{first_surah}/{first_ayah}"))
+                .description(description)
+                .colour(GREEN)
+                .footer(CreateEmbedFooter::new(footer.clone()))
+        })
+        .collect()
 }
 
 pub fn tafsir_embed(
@@ -88,9 +105,9 @@ fn daily_arabic(ayah: &Ayah) -> String {
 
 pub fn progress_embed(total: u32, streak: u32, done_today: bool) -> CreateEmbed {
     let today = if done_today {
-        "Today's ayah: memorized ✓"
+        "Today's wird: complete ✓"
     } else {
-        "Today's ayah: not done yet"
+        "Today's wird: not complete yet"
     };
 
     CreateEmbed::new()
@@ -99,20 +116,22 @@ pub fn progress_embed(total: u32, streak: u32, done_today: bool) -> CreateEmbed 
             "**Ayahs memorized:** {total}\n**Current streak:** {streak} day(s)\n**{today}**"
         ))
         .colour(GREEN)
-        .footer(CreateEmbedFooter::new("One ayah a day"))
+        .footer(CreateEmbedFooter::new(
+            "Your daily goal, one ayah at a time",
+        ))
 }
 
 pub fn help_embed() -> CreateEmbed {
     CreateEmbed::new()
         .title("Wird — how it works")
         .description(
-            "**One ayah at a time, every day.**\n\n\
-             1. Choose a plan with `/plan` — the full Qur'an or one surah, and how many ayahs per day (1–10).\n\
-             2. Run `/wird` each day to see your next ayah.\n\
-             3. Tap **Memorized** once you have learned it. Your plan moves on.\n\n\
+            "**Your daily goal, one ayah at a time.**\n\n\
+             1. Choose a plan with `/plan` — select the full Qur'an or one surah, then choose 1–10 ayahs per day.\n\
+             2. Run `/wird` to see all of today's ayahs together.\n\
+             3. Tap **Memorized** for each ayah once you have learned it.\n\n\
              **Commands**\n\
-             `/plan` — choose the full Qur'an or one surah, and your daily size\n\
-             `/wird` — show your current ayah and mark it memorized\n\
+             `/plan` — choose a plan and daily size in separate steps\n\
+             `/wird` — show today's ayahs together and mark each one memorized\n\
              `/progress` — see your total and daily streak\n\
              `/leaderboard` — the server's streak leaderboard\n\
              `/remind` — get a daily DM when your wird is unfinished\n\
@@ -120,24 +139,24 @@ pub fn help_embed() -> CreateEmbed {
              `/help` — this message",
         )
         .colour(GREEN)
-        .footer(CreateEmbedFooter::new("One ayah a day"))
+        .footer(CreateEmbedFooter::new("Your daily goal, one ayah at a time"))
 }
 
 pub fn intro_embed() -> CreateEmbed {
     CreateEmbed::new()
         .title("Welcome to Wird")
         .description(
-            "**Assalamu alaikum!** I help your server memorize the Qur'an together — one ayah at a time.\n\n\
+            "**Assalamu alaikum!** I help your server memorize the Qur'an together — one ayah at a time, at your own pace.\n\n\
              **How it works**\n\
-             1. `/plan` — choose the full Qur'an or a single surah, and how many ayahs per day (1–10).\n\
-             2. `/wird` — get your next ayah with its Arabic text and translation.\n\
-             3. Tap **Memorized** when you have learned it. Come back daily to grow your streak.\n\n\
+             1. `/plan` — choose the full Qur'an or a surah, then set 1–10 ayahs per day.\n\
+             2. `/wird` — see today's ayahs together with their Arabic text and translation.\n\
+             3. Tap **Memorized** on each ayah when you have learned it. Come back daily to grow your streak.\n\n\
              **Commands**\n\
              `/plan` · `/wird` · `/progress` · `/leaderboard` · `/remind` · `/reset` · `/help`\n\n\
              Start with `/plan`, and may Allah make it easy for you.",
         )
         .colour(GREEN)
-        .footer(CreateEmbedFooter::new("One ayah a day · /help for everything"))
+        .footer(CreateEmbedFooter::new("One ayah at a time · /help for everything"))
 }
 
 pub fn intro_buttons() -> CreateActionRow {
@@ -183,11 +202,7 @@ fn plural(count: u32, word: &str) -> String {
     }
 }
 
-pub fn surah_picker(
-    page: usize,
-    chapters: &ChapterList,
-    daily: Option<u16>,
-) -> (String, Vec<CreateActionRow>) {
+pub fn surah_picker(page: usize, chapters: &ChapterList) -> (String, Vec<CreateActionRow>) {
     let pages = surah_page_count(chapters).max(1);
     let page = page.min(pages - 1);
     let (start, end) = surah_page_bounds(page, chapters.len());
@@ -203,26 +218,22 @@ pub fn surah_picker(
         .collect();
 
     let menu = CreateSelectMenu::new(
-        surah_select_id(daily),
+        "wird|surah_select",
         CreateSelectMenuKind::String { options },
     )
     .placeholder("Choose a surah");
 
-    let previous = CreateButton::new(surah_page_id(page.saturating_sub(1), daily))
+    let previous = CreateButton::new(surah_page_id(page.saturating_sub(1)))
         .label("Previous")
         .style(ButtonStyle::Secondary)
         .disabled(page == 0);
-    let next = CreateButton::new(surah_page_id(page + 1, daily))
+    let next = CreateButton::new(surah_page_id(page + 1))
         .label("Next")
         .style(ButtonStyle::Secondary)
         .disabled(page + 1 >= pages);
 
-    let pace = match daily {
-        Some(daily) => format!(" Your plan will use {daily} ayah(s) per day."),
-        None => String::new(),
-    };
     let content = format!(
-        "Choose the surah you want to memorize. Page {}/{} · {} surahs.{pace}",
+        "Step 2 of 3: choose the surah you want to memorize. Page {}/{} · {} surahs.",
         page + 1,
         pages,
         chapters.len()
@@ -237,18 +248,39 @@ pub fn surah_picker(
     )
 }
 
-fn surah_select_id(daily: Option<u16>) -> String {
-    match daily {
-        Some(daily) => format!("wird|surah_select|{daily}"),
-        None => "wird|surah_select".to_owned(),
-    }
+fn surah_page_id(page: usize) -> String {
+    format!("wird|surah_page|{page}")
 }
 
-fn surah_page_id(page: usize, daily: Option<u16>) -> String {
-    match daily {
-        Some(daily) => format!("wird|surah_page|{page}|{daily}"),
-        None => format!("wird|surah_page|{page}"),
-    }
+pub fn daily_picker(target_surah: Option<u16>) -> (String, Vec<CreateActionRow>) {
+    let options = (1..=10)
+        .map(|daily| {
+            CreateSelectMenuOption::new(
+                format!("{daily} ayah{}", if daily == 1 { "" } else { "s" }),
+                daily.to_string(),
+            )
+        })
+        .collect();
+    let menu = CreateSelectMenu::new(
+        daily_target_id(target_surah),
+        CreateSelectMenuKind::String { options },
+    )
+    .placeholder("Choose your daily number of ayahs");
+    (
+        format!(
+            "Step {} of {}: choose how many ayahs to memorize each day.",
+            if target_surah.is_some() { 3 } else { 2 },
+            if target_surah.is_some() { 3 } else { 2 }
+        ),
+        vec![CreateActionRow::SelectMenu(menu)],
+    )
+}
+
+fn daily_target_id(target_surah: Option<u16>) -> String {
+    let target = target_surah
+        .map(|surah| surah.to_string())
+        .unwrap_or_else(|| "quran".to_owned());
+    format!("wird|daily_select|{target}")
 }
 
 fn surah_page_count(chapters: &ChapterList) -> usize {
@@ -262,30 +294,51 @@ fn surah_page_bounds(page: usize, total: usize) -> (usize, usize) {
 
 pub fn daily_buttons(
     day: NaiveDate,
-    verse_key: &str,
-    done: bool,
-    blocked_today: bool,
-) -> CreateActionRow {
+    ayahs: &[Ayah],
+    completed_today: &[String],
+) -> Vec<CreateActionRow> {
     let day = day.format("%Y-%m-%d");
-
-    let memorized = CreateButton::new(format!("wird|memorized|{day}|{verse_key}"))
-        .label(if done {
-            "Memorized ✓"
-        } else if blocked_today {
-            "Limit reached today"
-        } else {
-            "Memorized"
+    let buttons = ayahs
+        .iter()
+        .map(|ayah| {
+            let done = completed_today.contains(&ayah.verse_key);
+            CreateButton::new(format!("wird|memorized|{day}|{}", ayah.verse_key))
+                .label(if done {
+                    format!("{} ✓", ayah.verse_key)
+                } else {
+                    format!("Memorized {}", ayah.verse_key)
+                })
+                .style(ButtonStyle::Success)
+                .disabled(done)
         })
-        .style(ButtonStyle::Success)
-        .disabled(done || blocked_today);
-    let tafsir_en = CreateButton::new(format!("wird|tafsir_en|{verse_key}"))
-        .label("Tafsir (EN)")
-        .style(ButtonStyle::Secondary);
-    let tafsir_ar = CreateButton::new(format!("wird|tafsir_ar|{verse_key}"))
-        .label("Tafsir (AR)")
-        .style(ButtonStyle::Secondary);
+        .collect::<Vec<_>>();
+    let button_rows = buttons
+        .chunks(5)
+        .map(|buttons| CreateActionRow::Buttons(buttons.to_vec()))
+        .collect::<Vec<_>>();
+    let options = ayahs
+        .iter()
+        .map(|ayah| CreateSelectMenuOption::new(ayah.verse_key.clone(), ayah.verse_key.clone()))
+        .collect();
+    let tafsir_menu = CreateSelectMenu::new(
+        "wird|tafsir_select",
+        CreateSelectMenuKind::String { options },
+    )
+    .placeholder("Choose an ayah for tafsir");
+    let mut rows = button_rows;
+    rows.push(CreateActionRow::SelectMenu(tafsir_menu));
+    rows
+}
 
-    CreateActionRow::Buttons(vec![memorized, tafsir_en, tafsir_ar])
+pub fn tafsir_buttons(verse_key: &str) -> CreateActionRow {
+    CreateActionRow::Buttons(vec![
+        CreateButton::new(format!("wird|tafsir_en|{verse_key}"))
+            .label("Tafsir (EN)")
+            .style(ButtonStyle::Secondary),
+        CreateButton::new(format!("wird|tafsir_ar|{verse_key}"))
+            .label("Tafsir (AR)")
+            .style(ButtonStyle::Secondary),
+    ])
 }
 
 pub fn reset_prompt_buttons() -> CreateActionRow {
@@ -494,11 +547,17 @@ mod tests {
     }
 
     #[test]
-    fn the_surah_picker_keeps_the_chosen_daily_size() {
-        assert_eq!(surah_select_id(None), "wird|surah_select");
-        assert_eq!(surah_select_id(Some(4)), "wird|surah_select|4");
-        assert_eq!(surah_page_id(2, None), "wird|surah_page|2");
-        assert_eq!(surah_page_id(2, Some(4)), "wird|surah_page|2|4");
+    fn the_surah_picker_uses_paged_navigation() {
+        assert_eq!(surah_page_id(2), "wird|surah_page|2");
+    }
+
+    #[test]
+    fn daily_picker_has_a_distinct_selection_step() {
+        let (content, rows) = daily_picker(Some(18));
+        assert!(content.contains("Step 3 of 3"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(daily_target_id(Some(18)), "wird|daily_select|18");
+        assert_eq!(daily_target_id(None), "wird|daily_select|quran");
     }
 
     #[test]

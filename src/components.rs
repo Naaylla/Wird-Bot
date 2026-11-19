@@ -55,13 +55,14 @@ pub async fn handle(ctx: &Context, component: &ComponentInteraction) -> Result<(
         }
         "surah_page" => {
             let page = parts.next().unwrap_or_default();
-            let daily = parse_daily(parts.next());
-            surah_page(ctx, component, page, daily).await
+            surah_page(ctx, component, page).await
         }
-        "surah_select" => {
-            let daily = parse_daily(parts.next());
-            surah_select(ctx, component, daily).await
+        "surah_select" => surah_select(ctx, component).await,
+        "daily_select" => {
+            let target = parts.next().unwrap_or_default();
+            daily_select(ctx, component, target).await
         }
+        "tafsir_select" => tafsir_prompt(ctx, component).await,
         "help" => help(ctx, component).await,
         _ => Ok(()),
     }
@@ -176,7 +177,7 @@ async fn memorized(
                 db::stats(data.db.clone(), guild_id, user_id, Utc::now().date_naive()).await?;
             let completed = completed_today.len() as u16 + 1;
             let follow_up = if completed < plan.daily_target {
-                "Run `/wird` again to continue."
+                "Tap the next ayah's button in today's block."
             } else {
                 "Your next ayah will be available tomorrow."
             };
@@ -209,17 +210,7 @@ async fn memorized(
     Ok(())
 }
 
-fn parse_daily(raw: Option<&str>) -> Option<u16> {
-    raw.and_then(|value| value.parse::<u16>().ok())
-        .map(|value| value.clamp(1, 10))
-}
-
-async fn surah_page(
-    ctx: &Context,
-    component: &ComponentInteraction,
-    page: &str,
-    daily: Option<u16>,
-) -> Result<()> {
+async fn surah_page(ctx: &Context, component: &ComponentInteraction, page: &str) -> Result<()> {
     let data = Data::from_context(ctx).await?;
     let chapters = data.chapters.snapshot().await;
 
@@ -229,7 +220,7 @@ async fn surah_page(
             Vec::new(),
         )
     } else {
-        ui::surah_picker(page.parse().unwrap_or(0), &chapters, daily)
+        ui::surah_picker(page.parse().unwrap_or(0), &chapters)
     };
 
     component
@@ -246,55 +237,87 @@ async fn surah_page(
     Ok(())
 }
 
-async fn surah_select(
-    ctx: &Context,
-    component: &ComponentInteraction,
-    daily: Option<u16>,
-) -> Result<()> {
-    let Some(guild_id) = component.guild_id else {
-        return reply_ephemeral(ctx, component, "Use this in a server.").await;
-    };
-
+async fn surah_select(ctx: &Context, component: &ComponentInteraction) -> Result<()> {
     let ComponentInteractionDataKind::StringSelect { values } = &component.data.kind else {
         return Ok(());
     };
     let Some(surah) = values.first().and_then(|value| value.parse::<u16>().ok()) else {
-        return reply_ephemeral(
-            ctx,
-            component,
-            "Choose a surah from the list to start a surah plan.",
-        )
-        .await;
+        return reply_ephemeral(ctx, component, "Choose a surah from the list to continue.").await;
     };
 
     let data = Data::from_context(ctx).await?;
     let chapters = data.chapters.snapshot().await;
-    let Some(chapter) = chapters.get(&surah) else {
+    if !chapters.contains_key(&surah) {
         return reply_ephemeral(ctx, component, "That surah is not available right now.").await;
     };
 
+    let (content, components) = ui::daily_picker(Some(surah));
+    component
+        .create_response(
+            ctx.http.clone(),
+            CreateInteractionResponse::UpdateMessage(
+                CreateInteractionResponseMessage::new()
+                    .content(content)
+                    .components(components),
+            ),
+        )
+        .await?;
+
+    Ok(())
+}
+
+async fn daily_select(ctx: &Context, component: &ComponentInteraction, target: &str) -> Result<()> {
+    let Some(guild_id) = component.guild_id else {
+        return reply_ephemeral(ctx, component, "Use this in a server.").await;
+    };
+    let ComponentInteractionDataKind::StringSelect { values } = &component.data.kind else {
+        return Ok(());
+    };
+    let Some(daily_target) = values
+        .first()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|value| (1..=10).contains(value))
+    else {
+        return reply_ephemeral(ctx, component, "Choose between 1 and 10 ayahs per day.").await;
+    };
+
+    let data = Data::from_context(ctx).await?;
+    let chapters = data.chapters.snapshot().await;
+    let target_surah = if target == "quran" {
+        None
+    } else {
+        let Some(surah) = target
+            .parse::<u16>()
+            .ok()
+            .filter(|surah| chapters.contains_key(surah))
+        else {
+            return reply_ephemeral(ctx, component, "That surah is not available right now.").await;
+        };
+        Some(surah)
+    };
     let plan = db::set_plan(
         data.db.clone(),
         guild_id.get(),
         component.user.id.get(),
-        Some(surah),
-        daily,
+        target_surah,
+        Some(daily_target),
     )
     .await?;
-
+    let name = target_surah
+        .and_then(|surah| chapters.get(&surah))
+        .map(|chapter| chapter.name.as_str())
+        .unwrap_or("the full Qur'an");
     let pace = if plan.daily_target == 1 {
         "1 ayah per day".to_owned()
     } else {
         format!("{} ayahs per day", plan.daily_target)
     };
     let message = match plan.next_verse {
-        Some((next_surah, ayah)) => format!(
-            "Your personal plan is set to memorize {} in order, {pace}. Your current ayah is {next_surah}:{ayah}. Use `/wird` to read it.",
-            chapter.name
+        Some((surah, ayah)) => format!(
+            "Your personal plan is set to memorize {name} in order, {pace}. Your current ayah is {surah}:{ayah}. Use `/wird` to see today's ayahs."
         ),
         None => format!(
-            "You have completed {}. Choose a plan again when you are ready to start another.",
-            chapter.name
+            "You have completed {name}. Choose a plan again when you are ready to start another."
         ),
     };
 
@@ -312,6 +335,42 @@ async fn surah_select(
     Ok(())
 }
 
+async fn tafsir_prompt(ctx: &Context, component: &ComponentInteraction) -> Result<()> {
+    let ComponentInteractionDataKind::StringSelect { values } = &component.data.kind else {
+        return Ok(());
+    };
+    let Some(verse_key) = values.first() else {
+        return reply_ephemeral(ctx, component, "Choose an ayah for tafsir.").await;
+    };
+    let Some((surah, ayah)) = verse_key
+        .split_once(':')
+        .and_then(|(surah, ayah)| Some((surah.parse::<u16>().ok()?, ayah.parse::<u16>().ok()?)))
+    else {
+        return reply_ephemeral(ctx, component, "That ayah is not available.").await;
+    };
+    let data = Data::from_context(ctx).await?;
+    let chapters = data.chapters.snapshot().await;
+    if !chapters
+        .get(&surah)
+        .is_some_and(|chapter| (1..=chapter.verses).contains(&ayah))
+    {
+        return reply_ephemeral(ctx, component, "That ayah is not available.").await;
+    }
+
+    component
+        .create_response(
+            ctx.http.clone(),
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(format!("Choose a tafsir for **{verse_key}**."))
+                    .components(vec![ui::tafsir_buttons(verse_key)])
+                    .ephemeral(true),
+            ),
+        )
+        .await?;
+
+    Ok(())
+}
 async fn reset(ctx: &Context, component: &ComponentInteraction, step: &str) -> Result<()> {
     let Some(guild_id) = component.guild_id else {
         return reply_ephemeral(ctx, component, "Use this in a server.").await;
@@ -416,18 +475,4 @@ async fn reply_ephemeral(
         .await?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_daily;
-
-    #[test]
-    fn a_picked_surah_keeps_a_valid_daily_size() {
-        assert_eq!(parse_daily(Some("4")), Some(4));
-        assert_eq!(parse_daily(Some("0")), Some(1));
-        assert_eq!(parse_daily(Some("99")), Some(10));
-        assert_eq!(parse_daily(Some("x")), None);
-        assert_eq!(parse_daily(None), None);
-    }
 }
