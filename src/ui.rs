@@ -25,7 +25,7 @@ pub fn daily_embeds(
     } else if remaining == 0 {
         format!("Today's wird is complete: {completed}/{target} ayahs.")
     } else {
-        format!("{completed}/{target} ayahs memorized today · {remaining} ayah(s) left.")
+        format!("{completed}/{target} memorized today · {remaining} to go.")
     };
 
     let mut descriptions = Vec::new();
@@ -292,7 +292,7 @@ pub fn daily_buttons(
                 .label(if done {
                     format!("{} ✓", ayah.verse_key)
                 } else {
-                    format!("Memorized {}", ayah.verse_key)
+                    format!("I memorized {}", ayah.verse_key)
                 })
                 .style(ButtonStyle::Success)
                 .disabled(done)
