@@ -146,23 +146,9 @@ pub fn intro_embed() -> CreateEmbed {
     CreateEmbed::new()
         .title("Welcome to Wird")
         .description(
-            "**Assalamu alaikum!** I help your server memorize the Qur'an together — one ayah at a time, at your own pace.\n\n\
-             **How it works**\n\
-             1. `/plan` — choose the full Qur'an or a surah, then set 1–10 ayahs per day.\n\
-             2. `/wird` — see today's ayahs together with their Arabic text and translation.\n\
-             3. Tap **Memorized** on each ayah when you have learned it. Come back daily to grow your streak.\n\n\
-             **Commands**\n\
-             `/plan` · `/wird` · `/progress` · `/leaderboard` · `/remind` · `/reset` · `/help`\n\n\
-             Start with `/plan`, and may Allah make it easy for you.",
+            "Assalamu alaikum! Choose what you want to memorize with `/plan`, then run `/wird` to get started. Use `/help` if you need help.",
         )
         .colour(GREEN)
-        .footer(CreateEmbedFooter::new("One ayah at a time · /help for everything"))
-}
-
-pub fn intro_buttons() -> CreateActionRow {
-    CreateActionRow::Buttons(vec![CreateButton::new("wird|help")
-        .label("How it works")
-        .style(ButtonStyle::Secondary)])
 }
 
 pub fn leaderboard_embed(entries: &[LeaderEntry], today: NaiveDate) -> CreateEmbed {

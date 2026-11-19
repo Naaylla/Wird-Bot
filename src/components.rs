@@ -63,24 +63,8 @@ pub async fn handle(ctx: &Context, component: &ComponentInteraction) -> Result<(
             daily_select(ctx, component, target).await
         }
         "tafsir_select" => tafsir_prompt(ctx, component).await,
-        "help" => help(ctx, component).await,
         _ => Ok(()),
     }
-}
-
-async fn help(ctx: &Context, component: &ComponentInteraction) -> Result<()> {
-    component
-        .create_response(
-            ctx.http.clone(),
-            CreateInteractionResponse::Message(
-                CreateInteractionResponseMessage::new()
-                    .embed(ui::help_embed())
-                    .ephemeral(true),
-            ),
-        )
-        .await?;
-
-    Ok(())
 }
 
 async fn memorized(

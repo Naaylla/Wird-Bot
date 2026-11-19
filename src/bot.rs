@@ -129,9 +129,7 @@ async fn send_intro(ctx: &Context, guild: &Guild) {
         return;
     };
 
-    let message = CreateMessage::new()
-        .embed(ui::intro_embed())
-        .components(vec![ui::intro_buttons()]);
+    let message = CreateMessage::new().embed(ui::intro_embed());
 
     if let Err(err) = channel_id.send_message(&ctx.http, message).await {
         warn!(
