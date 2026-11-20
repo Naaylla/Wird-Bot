@@ -38,7 +38,21 @@ async fn main() -> Result<()> {
         "DISCORD_TOKEN is not set. Copy .env.example to .env and put your bot token there.",
     )?;
 
-    let db = db::open("wird.db").context("could not open the database")?;
+    let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "wird.db".to_owned());
+    warn_if_ephemeral_database(&db_path);
+    let db =
+        db::open(&db_path).with_context(|| format!("could not open the database at {db_path}"))?;
+    info!("database ready at {db_path}");
+    if let Some(offset) = std::env::var("DEFAULT_OFFSET")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        info!("default timezone offset: {offset}");
+    } else {
+        warn!(
+            "DEFAULT_OFFSET is not set; days roll over at UTC midnight. Set e.g. DEFAULT_OFFSET=+01:00"
+        );
+    }
     let api = quran::QuranClient::new()?;
 
     let chapters = Chapters::default();
@@ -65,6 +79,18 @@ async fn main() -> Result<()> {
     client.start().await.context("the Discord client stopped")?;
 
     Ok(())
+}
+
+fn warn_if_ephemeral_database(db_path: &str) {
+    let on_render = std::env::var_os("RENDER").is_some();
+    let looks_persistent = db_path.starts_with("/var/data")
+        || db_path.starts_with("/data")
+        || std::env::var_os("RENDER_DISK_PATH").is_some();
+    if on_render && !looks_persistent {
+        warn!(
+            "DATABASE_PATH={db_path} is not on a Render persistent disk. Progress will be wiped on every deploy. Mount a disk and set DATABASE_PATH=/var/data/wird.db"
+        );
+    }
 }
 
 async fn refresh_chapters(api: quran::QuranClient, chapters: Chapters) {

@@ -64,6 +64,7 @@ pub fn next_verse(
     }
 }
 
+#[cfg(test)]
 pub fn final_verse(chapters: &ChapterList, target_surah: Option<u16>) -> Option<(u16, u16)> {
     let surah = match target_surah {
         Some(surah) => surah,

@@ -40,7 +40,23 @@ A Discord bot for memorising the Qur'an at your own pace, with a daily goal of 1
 | `/progress` | View your memorization total and streak |
 | `/leaderboard` | View the server leaderboard |
 | `/remind` | Get a daily DM when your wird is unfinished; `/remind disable:true` turns it off |
+| `/timezone` | Optional override of the bot's default timezone |
 | `/reset` | Reset your own progress and streak in this server |
 | `/help` | A quick guide to the bot and its commands |
 
 Reminder DMs require the person to allow direct messages from server members. Run `cargo test` to run the tests. Memorization data is stored in `wird.db`; keep that file on persistent storage when hosting the bot.
+
+## Timezone
+
+Discord does not send a user's timezone, so the bot uses one default for everyone. Set it once with the `DEFAULT_OFFSET` environment variable, for example `DEFAULT_OFFSET=+01:00` or `DEFAULT_OFFSET=+05:30`. Each day's wird unlocks at midnight in that timezone. When today's goal is done, Wird shows a live countdown to the next one (Discord's "in X hours"). Individuals can still override the default with `/timezone`.
+
+## Hosting on Render
+
+Render's filesystem is wiped on every deploy unless you mount a [persistent disk](https://render.com/docs/disks). Either use the included `render.yaml` blueprint (disk at `/var/data`), or set these env vars yourself:
+
+```text
+DATABASE_PATH=/var/data/wird.db
+DEFAULT_OFFSET=+01:00
+```
+
+Without `DATABASE_PATH` on a disk, progress resets on every redeploy. Set `OWNER_ID` to your Discord user ID to enable the owner-only `/usage` command.

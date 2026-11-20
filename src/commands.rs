@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use serenity::all::{
     CommandDataOptionValue, CommandInteraction, Context, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EditInteractionResponse,
+    CreateInteractionResponseMessage, EditInteractionResponse, GuildId,
 };
 use tracing::warn;
 
@@ -86,12 +86,18 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
         .await;
     };
 
-    let day = Utc::now().date_naive();
+    let offset = db::get_timezone(data.db.clone(), guild_id, user_id).await?;
+    let day = db::local_date(offset);
     let day_string = day.format("%Y-%m-%d").to_string();
     let completed_today =
         db::verses_for_day(data.db.clone(), guild_id, user_id, &day_string).await?;
     let completed = completed_today.len() as u16;
     let target = plan.daily_target;
+    let next_wird = if completed >= target {
+        Some(db::next_wird_mention(db::next_wird_at(Utc::now(), offset)))
+    } else {
+        None
+    };
 
     let Some(verse_key) = ayah_to_show(plan, &completed_today) else {
         let message = match plan.target_surah {
@@ -148,6 +154,7 @@ pub async fn wird(ctx: &Context, command: &CommandInteraction) -> Result<()> {
                     target,
                     done,
                     plan.next_verse.is_none(),
+                    next_wird.as_deref(),
                 ))
                 .components(vec![ui::daily_buttons(
                     day,
@@ -174,8 +181,10 @@ pub async fn leaderboard(ctx: &Context, command: &CommandInteraction) -> Result<
         .await?;
 
     let data = Data::from_context(ctx).await?;
-    let today = Utc::now().date_naive();
-    let entries = db::leaderboard(data.db.clone(), guild_id, today, 15).await?;
+    let user_id = command.user.id.get();
+    let offset = db::get_timezone(data.db.clone(), guild_id, user_id).await?;
+    let today = db::local_date(offset);
+    let entries = db::leaderboard(data.db.clone(), guild_id, Utc::now(), 15).await?;
 
     command
         .edit_response(
@@ -203,7 +212,14 @@ pub async fn progress(ctx: &Context, command: &CommandInteraction) -> Result<()>
 
     let data = Data::from_context(ctx).await?;
     let user_id = command.user.id.get();
-    let stats = db::stats(data.db.clone(), guild_id, user_id, Utc::now().date_naive()).await?;
+    let offset = db::get_timezone(data.db.clone(), guild_id, user_id).await?;
+    let today = db::local_date(offset);
+    let stats = db::stats(data.db.clone(), guild_id, user_id, today).await?;
+    let next_wird = if stats.done_today {
+        Some(db::next_wird_mention(db::next_wird_at(Utc::now(), offset)))
+    } else {
+        None
+    };
 
     command
         .edit_response(
@@ -212,6 +228,7 @@ pub async fn progress(ctx: &Context, command: &CommandInteraction) -> Result<()>
                 stats.total,
                 stats.streak,
                 stats.done_today,
+                next_wird.as_deref(),
             )),
         )
         .await?;
@@ -255,7 +272,7 @@ pub async fn remind(ctx: &Context, command: &CommandInteraction) -> Result<()> {
         return reply_ephemeral(ctx, command, "Use a 24-hour time like `19:30`.").await;
     };
     let offset = match option_string(command, "offset") {
-        Some(raw) => match parse_offset(raw) {
+        Some(raw) => match db::parse_offset(raw) {
             Some(offset) => offset,
             None => {
                 return reply_ephemeral(
@@ -266,19 +283,91 @@ pub async fn remind(ctx: &Context, command: &CommandInteraction) -> Result<()> {
                 .await;
             }
         },
-        None => existing
-            .as_ref()
-            .map(|reminder| reminder.offset_minutes)
-            .unwrap_or(0),
+        None => db::get_timezone(data.db.clone(), guild_id, user_id).await?,
     };
 
     db::set_reminder(data.db.clone(), guild_id, user_id, &time, offset).await?;
+    db::set_timezone(data.db.clone(), guild_id, user_id, offset).await?;
 
     let message = format!(
         "Reminder set for **{time}** ({}). I will DM you when that day's wird is unfinished.",
         format_offset(offset)
     );
     reply_ephemeral(ctx, command, &message).await
+}
+
+pub async fn timezone(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let Some(guild_id) = guild_id(command) else {
+        return reply_ephemeral(ctx, command, "Use this command in a server.").await;
+    };
+
+    let data = Data::from_context(ctx).await?;
+    let user_id = command.user.id.get();
+
+    let Some(raw_offset) = option_string(command, "offset") else {
+        let offset = db::get_timezone(data.db.clone(), guild_id, user_id).await?;
+        let next = db::next_wird_mention(db::next_wird_at(Utc::now(), offset));
+        let message = format!(
+            "Your timezone is **{}**. Each day's wird starts at midnight there. {next}. Change it with `/timezone offset:+01:00`.",
+            format_offset(offset)
+        );
+        return reply_ephemeral(ctx, command, &message).await;
+    };
+
+    let Some(offset) = db::parse_offset(raw_offset) else {
+        return reply_ephemeral(
+            ctx,
+            command,
+            "Use a UTC offset like `+03:00`, `+05:30` or `-04:00`.",
+        )
+        .await;
+    };
+
+    db::set_timezone(data.db.clone(), guild_id, user_id, offset).await?;
+
+    let next = db::next_wird_mention(db::next_wird_at(Utc::now(), offset));
+    let message = format!(
+        "Your timezone is now **{}**. Each day's wird starts at midnight there. {next}.",
+        format_offset(offset)
+    );
+    reply_ephemeral(ctx, command, &message).await
+}
+
+pub async fn usage(ctx: &Context, command: &CommandInteraction) -> Result<()> {
+    let owner = std::env::var("OWNER_ID")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    if owner != Some(command.user.id.get()) {
+        return reply_ephemeral(ctx, command, "This command is for the bot owner.").await;
+    }
+
+    command
+        .create_response(
+            ctx.http.clone(),
+            CreateInteractionResponse::Defer(
+                CreateInteractionResponseMessage::new().ephemeral(true),
+            ),
+        )
+        .await?;
+
+    let data = Data::from_context(ctx).await?;
+    let guilds = db::usage(data.db.clone()).await?;
+
+    let mut names = std::collections::HashMap::new();
+    for guild in &guilds {
+        if let Ok(partial) = ctx.http.get_guild(GuildId::new(guild.guild_id)).await {
+            names.insert(guild.guild_id, partial.name);
+        }
+    }
+
+    command
+        .edit_response(
+            ctx.http.clone(),
+            EditInteractionResponse::new().embed(ui::usage_embed(&guilds, &names)),
+        )
+        .await?;
+
+    Ok(())
 }
 
 pub async fn help(ctx: &Context, command: &CommandInteraction) -> Result<()> {
@@ -366,23 +455,6 @@ fn parse_time(raw: &str) -> Option<String> {
     Some(format!("{hour:02}:{minute:02}"))
 }
 
-fn parse_offset(raw: &str) -> Option<i32> {
-    let raw = raw.trim();
-    let sign = match raw.chars().next()? {
-        '+' => 1,
-        '-' => -1,
-        _ => return None,
-    };
-    let (hour, minute) = raw[1..].split_once(':')?;
-    let hour: i32 = hour.parse().ok()?;
-    let minute: i32 = minute.parse().ok()?;
-    if hour > 14 || minute > 59 || (hour == 14 && minute > 0) {
-        return None;
-    }
-
-    Some(sign * (hour * 60 + minute))
-}
-
 fn format_offset(offset_minutes: i32) -> String {
     let sign = if offset_minutes < 0 { '-' } else { '+' };
     let offset = offset_minutes.abs();
@@ -432,11 +504,11 @@ mod tests {
         assert_eq!(parse_time("19:60"), None);
         assert_eq!(parse_time("19"), None);
 
-        assert_eq!(parse_offset("+03:00"), Some(180));
-        assert_eq!(parse_offset("+05:30"), Some(330));
-        assert_eq!(parse_offset("-04:00"), Some(-240));
-        assert_eq!(parse_offset("+14:30"), None);
-        assert_eq!(parse_offset("03:00"), None);
+        assert_eq!(db::parse_offset("+03:00"), Some(180));
+        assert_eq!(db::parse_offset("+05:30"), Some(330));
+        assert_eq!(db::parse_offset("-04:00"), Some(-240));
+        assert_eq!(db::parse_offset("+14:30"), None);
+        assert_eq!(db::parse_offset("03:00"), None);
 
         assert_eq!(format_offset(0), "UTC+00:00");
         assert_eq!(format_offset(330), "UTC+05:30");

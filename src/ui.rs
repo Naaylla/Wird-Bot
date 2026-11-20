@@ -5,7 +5,7 @@ use serenity::all::{
 };
 
 use crate::chapters::{Chapter, ChapterList};
-use crate::db::LeaderEntry;
+use crate::db::{GuildUsage, LeaderEntry};
 use crate::quran::{self, Ayah};
 
 const GREEN: u32 = 0x2E_CC_71;
@@ -19,16 +19,22 @@ pub fn daily_embed(
     target: u16,
     done: bool,
     plan_complete: bool,
+    next_wird: Option<&str>,
 ) -> CreateEmbed {
     let (surah, ayah_number) = quran::verse_parts(&ayah.verse_key);
     let title = chapter
         .map(|chapter| format!("{} · {} · {}", chapter.name, chapter.arabic, ayah.verse_key))
         .unwrap_or_else(|| format!("Surah {surah} · {}", ayah.verse_key));
-    let body = format!(
+    let mut body = format!(
         "{}\n\n**Translation**\n{}",
         daily_arabic(ayah),
         clean_text(&ayah.translation)
     );
+    if completed >= target {
+        if let Some(when) = next_wird {
+            body.push_str(&format!("\n\n**{when}**"));
+        }
+    }
     let footer = if plan_complete {
         format!("Plan complete · {completed}/{target} memorized today.")
     } else if completed >= target {
@@ -82,11 +88,19 @@ fn daily_arabic(ayah: &Ayah) -> String {
     }
 }
 
-pub fn progress_embed(total: u32, streak: u32, done_today: bool) -> CreateEmbed {
+pub fn progress_embed(
+    total: u32,
+    streak: u32,
+    done_today: bool,
+    next_wird: Option<&str>,
+) -> CreateEmbed {
     let today = if done_today {
-        "Today's wird: complete ✓"
+        match next_wird {
+            Some(when) => format!("Today's wird: complete ✓\n**{when}**"),
+            None => "Today's wird: complete ✓".to_owned(),
+        }
     } else {
-        "Today's wird: not complete yet"
+        "Today's wird: not complete yet".to_owned()
     };
 
     CreateEmbed::new()
@@ -99,9 +113,18 @@ pub fn progress_embed(total: u32, streak: u32, done_today: bool) -> CreateEmbed 
 
 pub fn help_embed() -> CreateEmbed {
     CreateEmbed::new()
-        .title("How to start")
+        .title("How Wird works")
         .description(
-            "Choose what to memorize with `/plan`, then use `/wird` to see your next ayah. Tap **Memorized** to move on. Use `/help` anytime you need a reminder.",
+            "1. `/plan` — choose the full Qur'an or one surah, then how many ayahs per day (1–10).\n\
+             2. `/wird` — see today's ayah and tap **Memorized** when ready.\n\
+             3. Come back each day; a new wird unlocks at midnight in your timezone.\n\n\
+             **Also useful**\n\
+             `/progress` — your total, streak, and whether today is done\n\
+             `/leaderboard` — server streaks\n\
+             `/remind` — daily DM if today's wird is unfinished (allow DMs from server members)\n\
+             `/timezone` — when your day starts (e.g. `+01:00`)\n\
+             `/reset` — wipe your progress in this server\n\n\
+             Changing plan keeps your streak and past ayahs; you just restart that plan from ayah 1.",
         )
         .colour(GREEN)
 }
@@ -110,9 +133,53 @@ pub fn intro_embed() -> CreateEmbed {
     CreateEmbed::new()
         .title("Welcome to Wird")
         .description(
-            "Assalamu alaikum! Choose what you want to memorize with `/plan`, then run `/wird` to get started. Use `/help` if you need help.",
+            "Assalamu alaikum! Start with `/plan`, then `/wird` each day. Use `/help` for every command.",
         )
         .colour(GREEN)
+}
+
+pub fn usage_embed(
+    guilds: &[GuildUsage],
+    names: &std::collections::HashMap<u64, String>,
+) -> CreateEmbed {
+    let total: usize = guilds.iter().map(|guild| guild.users.len()).sum();
+    let mut lines = Vec::new();
+
+    for guild in guilds {
+        let name = names
+            .get(&guild.guild_id)
+            .cloned()
+            .unwrap_or_else(|| format!("Server {}", guild.guild_id));
+        lines.push(format!("\n**{name}** — {} user(s)", guild.users.len()));
+
+        for user in guild.users.iter().take(20) {
+            let last = user.last_day.as_deref().unwrap_or("never");
+            lines.push(format!(
+                "<@{}> — {} · last {}",
+                user.user_id,
+                plural(user.memorized, "ayah"),
+                last
+            ));
+        }
+        if guild.users.len() > 20 {
+            lines.push(format!("…and {} more", guild.users.len() - 20));
+        }
+    }
+
+    let description = if lines.is_empty() {
+        "No users yet.".to_owned()
+    } else {
+        lines.join("\n")
+    };
+
+    CreateEmbed::new()
+        .title("Wird usage")
+        .description(truncate(&description, 4_000))
+        .colour(GREEN)
+        .footer(CreateEmbedFooter::new(format!(
+            "{total} user record(s) · {} server(s)",
+            guilds.len()
+        )))
 }
 
 pub fn leaderboard_embed(entries: &[LeaderEntry], today: NaiveDate) -> CreateEmbed {
@@ -301,15 +368,9 @@ pub fn reset_confirm_buttons() -> CreateActionRow {
     ])
 }
 
-pub fn wird_completed_announcement(user_id: u64, completed: u16, daily_target: u16) -> String {
-    format!(
-        "MashaAllah! <@{user_id}> completed today's wird ({completed}/{daily_target}). May Allah accept it."
-    )
-}
-
-pub fn reset_cancel_button() -> CreateActionRow {
+pub fn reset_done_button() -> CreateActionRow {
     CreateActionRow::Buttons(vec![CreateButton::new("wird|reset|dismiss")
-        .label("Cancel")
+        .label("Done")
         .style(ButtonStyle::Secondary)])
 }
 
@@ -452,15 +513,6 @@ mod tests {
             clean_text("Allah<sup foot_note=1>2</sup> is One."),
             "Allah is One."
         );
-    }
-
-    #[test]
-    fn wird_completed_announcement_mentions_only_the_completer() {
-        let message = wird_completed_announcement(123, 4, 4);
-
-        assert!(message.contains("<@123>"));
-        assert!(message.contains("(4/4)"));
-        assert_eq!(message.matches("<@").count(), 1);
     }
 
     #[test]

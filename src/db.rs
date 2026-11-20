@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
-use chrono::{DateTime, Days, FixedOffset, NaiveDate, Utc};
+use anyhow::{Context as _, Result};
+use chrono::{DateTime, Days, FixedOffset, NaiveDate, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 const SCHEMA: &str = "
@@ -32,6 +33,13 @@ CREATE TABLE IF NOT EXISTS reminders (
     time           TEXT NOT NULL,
     offset_minutes INTEGER NOT NULL DEFAULT 0,
     last_sent_day  TEXT,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_timezones (
+    guild_id       TEXT NOT NULL,
+    user_id        TEXT NOT NULL,
+    offset_minutes INTEGER NOT NULL,
     PRIMARY KEY (guild_id, user_id)
 );
 ";
@@ -65,6 +73,17 @@ pub struct LeaderEntry {
     pub streak: u32,
 }
 
+pub struct UserUsage {
+    pub user_id: u64,
+    pub memorized: u32,
+    pub last_day: Option<String>,
+}
+
+pub struct GuildUsage {
+    pub guild_id: u64,
+    pub users: Vec<UserUsage>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reminder {
     pub guild_id: u64,
@@ -80,7 +99,16 @@ pub struct DueReminder {
 }
 
 pub fn open(path: &str) -> Result<Connection> {
-    let connection = Connection::open(path)?;
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("could not create database directory {}", parent.display())
+            })?;
+        }
+    }
+
+    let connection = Connection::open(path)
+        .with_context(|| format!("could not open sqlite database at {path}"))?;
     let fresh = !table_exists(&connection, "user_plans")?;
     migrate(&connection)?;
     connection.execute_batch(SCHEMA)?;
@@ -446,11 +474,13 @@ pub async fn stats(
 pub async fn leaderboard(
     db: Arc<Mutex<Connection>>,
     guild_id: u64,
-    today: NaiveDate,
+    now: DateTime<Utc>,
     limit: usize,
 ) -> Result<Vec<LeaderEntry>> {
     tokio::task::spawn_blocking(move || {
         let connection = lock(&db);
+        let offsets = read_offsets(&connection, guild_id)?;
+
         let mut statement =
             connection.prepare("SELECT user_id, day FROM memorizations WHERE guild_id = ?1")?;
         let rows = statement.query_map(params![guild_id.to_string()], |row| {
@@ -473,7 +503,11 @@ pub async fn leaderboard(
             .into_iter()
             .map(|(user_id, days)| {
                 let known: HashSet<NaiveDate> = days.into_iter().collect();
-                let (streak, _) = active_streak(&known, today);
+                let offset = offsets
+                    .get(&user_id)
+                    .copied()
+                    .unwrap_or_else(default_offset);
+                let (streak, _) = active_streak(&known, local_date_at(now, offset));
                 LeaderEntry { user_id, streak }
             })
             .collect();
@@ -482,6 +516,86 @@ pub async fn leaderboard(
         entries.truncate(limit);
 
         Ok(entries)
+    })
+    .await?
+}
+
+fn read_offsets(connection: &Connection, guild_id: u64) -> rusqlite::Result<HashMap<u64, i32>> {
+    let mut offsets = HashMap::new();
+
+    let mut statement = connection
+        .prepare("SELECT user_id, offset_minutes FROM user_timezones WHERE guild_id = ?1")?;
+    let rows = statement.query_map(params![guild_id.to_string()], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))
+    })?;
+    for row in rows {
+        let (user_id, offset) = row?;
+        if let Ok(user_id) = user_id.parse::<u64>() {
+            offsets.insert(user_id, offset);
+        }
+    }
+
+    let mut statement =
+        connection.prepare("SELECT user_id, offset_minutes FROM reminders WHERE guild_id = ?1")?;
+    let rows = statement.query_map(params![guild_id.to_string()], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))
+    })?;
+    for row in rows {
+        let (user_id, offset) = row?;
+        if let Ok(user_id) = user_id.parse::<u64>() {
+            offsets.entry(user_id).or_insert(offset);
+        }
+    }
+
+    Ok(offsets)
+}
+
+pub async fn usage(db: Arc<Mutex<Connection>>) -> Result<Vec<GuildUsage>> {
+    tokio::task::spawn_blocking(move || {
+        let connection = lock(&db);
+        let mut statement = connection.prepare(
+            "SELECT keys.guild_id, keys.user_id, COUNT(m.verse_key), MAX(m.day)
+             FROM (
+                 SELECT guild_id, user_id FROM user_plans
+                 UNION SELECT guild_id, user_id FROM memorizations
+                 UNION SELECT guild_id, user_id FROM reminders
+                 UNION SELECT guild_id, user_id FROM user_timezones
+             ) AS keys
+             LEFT JOIN memorizations m
+                 ON m.guild_id = keys.guild_id AND m.user_id = keys.user_id
+             GROUP BY keys.guild_id, keys.user_id
+             ORDER BY keys.guild_id, COUNT(m.verse_key) DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+
+        let mut by_guild: HashMap<u64, Vec<UserUsage>> = HashMap::new();
+        for row in rows {
+            let (guild_id, user_id, memorized, last_day) = row?;
+            let (Ok(guild_id), Ok(user_id)) = (guild_id.parse::<u64>(), user_id.parse::<u64>())
+            else {
+                continue;
+            };
+            by_guild.entry(guild_id).or_default().push(UserUsage {
+                user_id,
+                memorized,
+                last_day,
+            });
+        }
+
+        let mut guilds: Vec<GuildUsage> = by_guild
+            .into_iter()
+            .map(|(guild_id, users)| GuildUsage { guild_id, users })
+            .collect();
+        guilds.sort_by_key(|guild| guild.guild_id);
+
+        Ok(guilds)
     })
     .await?
 }
@@ -565,6 +679,60 @@ pub async fn clear_reminder(
     .await?
 }
 
+pub async fn get_timezone(db: Arc<Mutex<Connection>>, guild_id: u64, user_id: u64) -> Result<i32> {
+    tokio::task::spawn_blocking(move || {
+        let connection = lock(&db);
+        if let Some(offset) = connection
+            .query_row(
+                "SELECT offset_minutes FROM user_timezones
+                 WHERE guild_id = ?1 AND user_id = ?2",
+                params![guild_id.to_string(), user_id.to_string()],
+                |row| row.get::<_, i32>(0),
+            )
+            .optional()?
+        {
+            return Ok(offset);
+        }
+
+        let offset = connection
+            .query_row(
+                "SELECT offset_minutes FROM reminders
+                 WHERE guild_id = ?1 AND user_id = ?2",
+                params![guild_id.to_string(), user_id.to_string()],
+                |row| row.get::<_, i32>(0),
+            )
+            .optional()?;
+
+        Ok(offset.unwrap_or_else(default_offset))
+    })
+    .await?
+}
+
+pub async fn set_timezone(
+    db: Arc<Mutex<Connection>>,
+    guild_id: u64,
+    user_id: u64,
+    offset_minutes: i32,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let connection = lock(&db);
+        connection.execute(
+            "INSERT INTO user_timezones (guild_id, user_id, offset_minutes)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (guild_id, user_id)
+             DO UPDATE SET offset_minutes = excluded.offset_minutes",
+            params![guild_id.to_string(), user_id.to_string(), offset_minutes],
+        )?;
+        connection.execute(
+            "UPDATE reminders SET offset_minutes = ?3
+             WHERE guild_id = ?1 AND user_id = ?2",
+            params![guild_id.to_string(), user_id.to_string(), offset_minutes],
+        )?;
+        Ok(())
+    })
+    .await?
+}
+
 pub async fn due_reminders(
     db: Arc<Mutex<Connection>>,
     now: DateTime<Utc>,
@@ -629,6 +797,63 @@ pub async fn mark_reminder_sent(
         Ok(())
     })
     .await?
+}
+
+pub fn local_date_at(now: DateTime<Utc>, offset_minutes: i32) -> NaiveDate {
+    let offset = FixedOffset::east_opt(offset_minutes * 60)
+        .unwrap_or_else(|| FixedOffset::east_opt(0).expect("UTC is a valid offset"));
+    now.with_timezone(&offset).date_naive()
+}
+
+pub fn local_date(offset_minutes: i32) -> NaiveDate {
+    local_date_at(Utc::now(), offset_minutes)
+}
+
+/// Instant when the next day's wird unlocks (local midnight in the user's offset).
+pub fn next_wird_at(now: DateTime<Utc>, offset_minutes: i32) -> DateTime<Utc> {
+    let offset = FixedOffset::east_opt(offset_minutes * 60)
+        .unwrap_or_else(|| FixedOffset::east_opt(0).expect("UTC is a valid offset"));
+    let local = now.with_timezone(&offset);
+    let next_day = local.date_naive() + Days::new(1);
+    let midnight = next_day
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is a valid time");
+    offset
+        .from_local_datetime(&midnight)
+        .single()
+        .expect("fixed offsets have a unique midnight")
+        .with_timezone(&Utc)
+}
+
+/// Discord relative + local-time mention, e.g. "in 5 hours (00:00)".
+pub fn next_wird_mention(at: DateTime<Utc>) -> String {
+    let ts = at.timestamp();
+    format!("Next wird <t:{ts}:R> (<t:{ts}:t>)")
+}
+
+pub fn parse_offset(raw: &str) -> Option<i32> {
+    let raw = raw.trim();
+    let sign = match raw.chars().next()? {
+        '+' => 1,
+        '-' => -1,
+        _ => return None,
+    };
+    let (hour, minute) = raw[1..].split_once(':')?;
+    let hour: i32 = hour.parse().ok()?;
+    let minute: i32 = minute.parse().ok()?;
+    if hour > 14 || minute > 59 || (hour == 14 && minute > 0) {
+        return None;
+    }
+
+    Some(sign * (hour * 60 + minute))
+}
+
+pub fn default_offset() -> i32 {
+    std::env::var("DEFAULT_OFFSET")
+        .ok()
+        .as_deref()
+        .and_then(parse_offset)
+        .unwrap_or(0)
 }
 
 fn due_day(
@@ -951,8 +1176,8 @@ mod tests {
         .await
         .unwrap();
 
-        let today = NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
-        let entries = leaderboard(db.clone(), GUILD, today, 10).await.unwrap();
+        let now: DateTime<Utc> = "2026-11-12T12:00:00Z".parse().unwrap();
+        let entries = leaderboard(db.clone(), GUILD, now, 10).await.unwrap();
 
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].user_id, 1);
@@ -962,7 +1187,7 @@ mod tests {
         assert_eq!(entries[2].user_id, 3);
         assert_eq!(entries[2].streak, 0);
 
-        let top = leaderboard(db.clone(), GUILD, today, 1).await.unwrap();
+        let top = leaderboard(db.clone(), GUILD, now, 1).await.unwrap();
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].user_id, 1);
         let _ = std::fs::remove_file(path);
@@ -1012,6 +1237,7 @@ mod tests {
         );
 
         let today = NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        let now: DateTime<Utc> = "2026-11-12T12:00:00Z".parse().unwrap();
         assert_eq!(stats(db.clone(), GUILD, 1, today).await.unwrap().total, 1);
         assert_eq!(
             stats(db.clone(), OTHER_GUILD, 1, today)
@@ -1020,7 +1246,7 @@ mod tests {
                 .total,
             0
         );
-        assert!(leaderboard(db.clone(), OTHER_GUILD, today, 10)
+        assert!(leaderboard(db.clone(), OTHER_GUILD, now, 10)
             .await
             .unwrap()
             .is_empty());
@@ -1105,6 +1331,91 @@ mod tests {
             Some("2026-11-13".to_owned())
         );
         assert_eq!(due_day("23:59", 480, None, now), None);
+    }
+
+    #[test]
+    fn local_dates_follow_each_users_offset() {
+        let now: DateTime<Utc> = "2026-11-12T23:30:00Z".parse().unwrap();
+
+        assert_eq!(
+            local_date_at(now, 0),
+            NaiveDate::from_ymd_opt(2026, 11, 12).unwrap()
+        );
+        assert_eq!(
+            local_date_at(now, 60),
+            NaiveDate::from_ymd_opt(2026, 11, 13).unwrap()
+        );
+        assert_eq!(
+            local_date_at(now, -300),
+            NaiveDate::from_ymd_opt(2026, 11, 12).unwrap()
+        );
+    }
+
+    #[test]
+    fn next_wird_is_the_following_local_midnight() {
+        let now: DateTime<Utc> = "2026-11-12T15:30:00Z".parse().unwrap();
+
+        // UTC+01:00 → next midnight is 2026-11-13 00:00+01:00 = 23:00Z on the 12th.
+        assert_eq!(
+            next_wird_at(now, 60),
+            "2026-11-12T23:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        assert_eq!(
+            next_wird_mention(next_wird_at(now, 60)),
+            format!(
+                "Next wird <t:{}:R> (<t:{}:t>)",
+                next_wird_at(now, 60).timestamp(),
+                next_wird_at(now, 60).timestamp()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_users_timezone_wins_over_the_reminder_offset() {
+        let (db, path) = test_db("timezones");
+
+        assert_eq!(get_timezone(db.clone(), GUILD, 1).await.unwrap(), 0);
+
+        set_reminder(db.clone(), GUILD, 1, "06:00", 240)
+            .await
+            .unwrap();
+        assert_eq!(get_timezone(db.clone(), GUILD, 1).await.unwrap(), 240);
+
+        set_timezone(db.clone(), GUILD, 1, 60).await.unwrap();
+        assert_eq!(get_timezone(db.clone(), GUILD, 1).await.unwrap(), 60);
+        assert_eq!(
+            get_reminder(db.clone(), GUILD, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .offset_minutes,
+            60
+        );
+        assert_eq!(get_timezone(db.clone(), OTHER_GUILD, 1).await.unwrap(), 0);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn usage_lists_users_from_plans_and_reminders() {
+        let (db, path) = test_db("usage");
+
+        set_plan(db.clone(), GUILD, 1, None, None).await.unwrap();
+        set_plan(db.clone(), OTHER_GUILD, 2, None, None)
+            .await
+            .unwrap();
+        set_reminder(db.clone(), GUILD, 3, "06:00", 0)
+            .await
+            .unwrap();
+
+        let guilds = usage(db.clone()).await.unwrap();
+        assert_eq!(guilds.len(), 2);
+        assert_eq!(guilds[0].guild_id, GUILD);
+        assert_eq!(guilds[0].users.len(), 2);
+        assert_eq!(guilds[1].guild_id, OTHER_GUILD);
+        assert_eq!(guilds[1].users.len(), 1);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

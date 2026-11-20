@@ -73,7 +73,18 @@ async fn memorized(
     day: &str,
     verse_key: &str,
 ) -> Result<()> {
-    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    let Some(guild_id) = component.guild_id else {
+        return reply_ephemeral(ctx, component, "Use this in a server.").await;
+    };
+    let guild_id = guild_id.get();
+
+    let data = Data::from_context(ctx).await?;
+    let chapters = data.chapters.snapshot().await;
+    let user_id = component.user.id.get();
+
+    let offset = db::get_timezone(data.db.clone(), guild_id, user_id).await?;
+    let today_date = db::local_date(offset);
+    let today = today_date.format("%Y-%m-%d").to_string();
 
     if day != today {
         return reply_ephemeral(
@@ -83,15 +94,6 @@ async fn memorized(
         )
         .await;
     }
-
-    let Some(guild_id) = component.guild_id else {
-        return reply_ephemeral(ctx, component, "Use this in a server.").await;
-    };
-    let guild_id = guild_id.get();
-
-    let data = Data::from_context(ctx).await?;
-    let chapters = data.chapters.snapshot().await;
-    let user_id = component.user.id.get();
 
     let Some(plan) = db::get_plan(data.db.clone(), guild_id, user_id).await? else {
         return reply_ephemeral(
@@ -132,11 +134,12 @@ async fn memorized(
         .await;
     }
     if completed_today.len() as u16 >= plan.daily_target {
+        let next = db::next_wird_mention(db::next_wird_at(Utc::now(), offset));
         return reply_ephemeral(
             ctx,
             component,
             &format!(
-                "You have reached today's wird of {} ayah(s). Come back tomorrow, in shaa Allah.",
+                "You have reached today's wird of {} ayah(s). {next}.",
                 plan.daily_target
             ),
         )
@@ -158,6 +161,7 @@ async fn memorized(
     if result == db::MarkResult::Inserted {
         let completed = completed_today.len() as u16 + 1;
         if completed >= plan.daily_target {
+            let unlock = db::next_wird_mention(db::next_wird_at(Utc::now(), offset));
             let message = if next.is_none() {
                 match plan.target_surah {
                     Some(surah) => format!(
@@ -168,7 +172,7 @@ async fn memorized(
                 }
             } else {
                 format!(
-                    "MashaAllah! Today's goal is complete ({completed}/{}). Come back tomorrow, in shaa Allah.",
+                    "MashaAllah! Today's goal is complete ({completed}/{}). {unlock}.",
                     plan.daily_target
                 )
             };
@@ -181,13 +185,6 @@ async fn memorized(
                             .embeds(Vec::new())
                             .components(Vec::new()),
                     ),
-                )
-                .await?;
-            component
-                .channel_id
-                .say(
-                    &ctx.http,
-                    ui::wird_completed_announcement(user_id, completed, plan.daily_target),
                 )
                 .await?;
         } else if let Some((next_surah, next_ayah)) = next {
@@ -206,9 +203,10 @@ async fn memorized(
                                         plan.daily_target,
                                         false,
                                         false,
+                                        None,
                                     ))
                                     .components(vec![ui::daily_buttons(
-                                        Utc::now().date_naive(),
+                                        today_date,
                                         &ayah.verse_key,
                                         false,
                                         false,
@@ -260,10 +258,13 @@ async fn memorized(
         db::MarkResult::AlreadyDone => {
             "You already memorized this ayah today. Run `/wird` to continue.".to_owned()
         }
-        db::MarkResult::DailyLimit => format!(
-            "You have reached today's wird of {} ayah(s). Come back tomorrow, in shaa Allah.",
-            plan.daily_target
-        ),
+        db::MarkResult::DailyLimit => {
+            let unlock = db::next_wird_mention(db::next_wird_at(Utc::now(), offset));
+            format!(
+                "You have reached today's wird of {} ayah(s). {unlock}.",
+                plan.daily_target
+            )
+        }
         db::MarkResult::Stale => {
             "Your plan has changed. Run `/wird` to get your current ayah.".to_owned()
         }
@@ -346,6 +347,8 @@ async fn daily_select(ctx: &Context, component: &ComponentInteraction, target: &
 
     let data = Data::from_context(ctx).await?;
     let chapters = data.chapters.snapshot().await;
+    let user_id = component.user.id.get();
+    let guild_id = guild_id.get();
     let target_surah = if target == "quran" {
         None
     } else {
@@ -358,10 +361,14 @@ async fn daily_select(ctx: &Context, component: &ComponentInteraction, target: &
         };
         Some(surah)
     };
+    let previous = db::get_plan(data.db.clone(), guild_id, user_id).await?;
+    let plan_changed = previous
+        .as_ref()
+        .is_some_and(|plan| plan.target_surah != target_surah);
     let plan = db::set_plan(
         data.db.clone(),
-        guild_id.get(),
-        component.user.id.get(),
+        guild_id,
+        user_id,
         target_surah,
         Some(daily_target),
     )
@@ -376,6 +383,9 @@ async fn daily_select(ctx: &Context, component: &ComponentInteraction, target: &
         format!("{} ayahs per day", plan.daily_target)
     };
     let message = match plan.next_verse {
+        Some((surah, ayah)) if plan_changed => format!(
+            "Plan updated to memorize {name} in order, {pace}, starting at {surah}:{ayah}. Your streak and past ayahs are kept. Use `/wird` for today's ayahs."
+        ),
         Some((surah, ayah)) => format!(
             "Your personal plan is set to memorize {name} in order, {pace}. Your current ayah is {surah}:{ayah}. Use `/wird` to see today's ayahs."
         ),
@@ -461,7 +471,7 @@ async fn reset(ctx: &Context, component: &ComponentInteraction, step: &str) -> R
                 .content(
                     "Your progress has been reset. Run `/wird` to start again from the first ayah of your plan, or `/plan` to choose a different plan.",
                 )
-                .components(vec![ui::reset_cancel_button()])
+                .components(vec![ui::reset_done_button()])
         }
         "dismiss" => CreateInteractionResponseMessage::new()
             .content(

@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: wird
+    runtime: rust
+    plan: starter
+    buildCommand: cargo build --release
+    startCommand: ./target/release/wird
+    healthCheckPath: /
+    disk:
+      name: wird-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_PATH
+        value: /var/data/wird.db
+      - key: DEFAULT_OFFSET
+        sync: false
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: OWNER_ID
+        sync: false

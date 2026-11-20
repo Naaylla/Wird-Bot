@@ -63,6 +63,8 @@ async fn run_command(ctx: &Context, command: &CommandInteraction) -> Result<()> 
         "leaderboard" => commands::leaderboard(ctx, command).await,
         "reset" => commands::reset(ctx, command).await,
         "remind" => commands::remind(ctx, command).await,
+        "timezone" => commands::timezone(ctx, command).await,
+        "usage" => commands::usage(ctx, command).await,
         "help" => commands::help(ctx, command).await,
         other => {
             warn!("unknown command: {other}");
@@ -115,6 +117,18 @@ fn command_definitions() -> Vec<CreateCommand> {
                 "disable",
                 "Turn your daily reminder off",
             )),
+        CreateCommand::new("timezone")
+            .description("Optional: override the bot's default timezone")
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "offset",
+                    "Your UTC offset, e.g. +03:00 or +05:30",
+                )
+                .min_length(6)
+                .max_length(6),
+            ),
+        CreateCommand::new("usage").description("Owner only: show who is using the bot"),
         CreateCommand::new("help").description("How Wird works and what each command does"),
     ]
 }

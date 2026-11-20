@@ -36,7 +36,7 @@ async fn tick(http: &Http, db: Arc<Mutex<Connection>>) -> Result<()> {
             continue;
         }
 
-        if let Err(err) = notify(http, db.clone(), &reminder).await {
+        if let Err(err) = notify(http, db.clone(), &reminder, &due.day).await {
             warn!(
                 "could not send a reminder to user {}: {err:#}",
                 reminder.user_id
@@ -47,13 +47,17 @@ async fn tick(http: &Http, db: Arc<Mutex<Connection>>) -> Result<()> {
     Ok(())
 }
 
-async fn notify(http: &Http, db: Arc<Mutex<Connection>>, reminder: &db::Reminder) -> Result<()> {
+async fn notify(
+    http: &Http,
+    db: Arc<Mutex<Connection>>,
+    reminder: &db::Reminder,
+    day: &str,
+) -> Result<()> {
     let Some(plan) = db::get_plan(db.clone(), reminder.guild_id, reminder.user_id).await? else {
         return Ok(());
     };
 
-    let day = Utc::now().date_naive().format("%Y-%m-%d").to_string();
-    let completed = db::verses_for_day(db.clone(), reminder.guild_id, reminder.user_id, &day)
+    let completed = db::verses_for_day(db.clone(), reminder.guild_id, reminder.user_id, day)
         .await?
         .len() as u16;
     if completed >= plan.daily_target {
